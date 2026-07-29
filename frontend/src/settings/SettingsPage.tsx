@@ -20,11 +20,22 @@ interface SettingsResponse {
   notes_doc_url: string | null;
 }
 
+interface FeatureDef {
+  key: string;
+  label: string;
+}
+
 interface AllowedEmail {
   id: number;
   email: string;
   added_by: string | null;
   created_at: string;
+  features: Record<string, boolean>;
+}
+
+interface AllowedEmailsResponse {
+  features: FeatureDef[];
+  allowed: AllowedEmail[];
 }
 
 export function SettingsPage({
@@ -201,12 +212,16 @@ export function SettingsPage({
 
 function AllowedEmails() {
   const [rows, setRows] = useState<AllowedEmail[]>([]);
+  const [features, setFeatures] = useState<FeatureDef[]>([]);
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    apiGet<{ allowed: AllowedEmail[] }>("/settings/allowed-emails")
-      .then((r) => setRows(r.allowed))
+    apiGet<AllowedEmailsResponse>("/settings/allowed-emails")
+      .then((r) => {
+        setRows(r.allowed);
+        setFeatures(r.features);
+      })
       .catch((e: Error) => setError(e.message));
   }, []);
 
@@ -235,18 +250,56 @@ function AllowedEmails() {
     }
   };
 
+  const toggleFeature = async (
+    row: AllowedEmail,
+    key: string,
+    enabled: boolean,
+  ) => {
+    setError(null);
+    // Optimistic: reflect the toggle immediately, roll back on failure.
+    setRows((rs) =>
+      rs.map((r) =>
+        r.id === row.id
+          ? { ...r, features: { ...r.features, [key]: enabled } }
+          : r,
+      ),
+    );
+    try {
+      await apiPut(
+        `/settings/allowed-emails/${encodeURIComponent(row.email)}/features`,
+        { feature: key, enabled },
+      );
+    } catch (err) {
+      setError((err as Error).message);
+      load();
+    }
+  };
+
   return (
     <section className="settings-section">
       <h3>Allowed emails</h3>
       <p className="settings-hint">
         Only these Google accounts (plus you) can sign in. Removing one blocks
-        future sign-ins.
+        future sign-ins. The checkboxes turn features on per person — you (the
+        superuser) always have every feature.
       </p>
       {error && <p className="settings-error">{error}</p>}
       <ul className="settings-allow-list">
         {rows.map((r) => (
           <li key={r.id}>
-            <span>{r.email}</span>
+            <span className="settings-allow-email">{r.email}</span>
+            <span className="settings-allow-features">
+              {features.map((f) => (
+                <label key={f.key} className="settings-feature-toggle">
+                  <input
+                    type="checkbox"
+                    checked={r.features[f.key] ?? false}
+                    onChange={(e) => toggleFeature(r, f.key, e.target.checked)}
+                  />
+                  {f.label}
+                </label>
+              ))}
+            </span>
             <button
               onClick={() => remove(r.email)}
               aria-label={`Remove ${r.email}`}

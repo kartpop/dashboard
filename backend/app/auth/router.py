@@ -21,6 +21,7 @@ from app.auth.deps import get_current_user
 from app.auth.models import User
 from app.db import get_session
 from app.google import auth as google_auth
+from app.news import gating as news_gating
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +91,18 @@ async def logout(request: Request):
 
 
 @router.get("/me")
-async def me(user: User = Depends(get_current_user)):
+async def me(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
     return {
         "id": user.id,
         "email": user.email,
         "name": user.name,
         "picture": user.picture,
         "is_superuser": user.is_superuser,
+        # Goal 11: whether the News feature is on for this user (the per-user flag on
+        # their allowlist row; superusers always). The frontend shows the News rail
+        # entry only when true; /news 403s otherwise.
+        "news_enabled": news_gating.is_news_enabled(session, user),
     }

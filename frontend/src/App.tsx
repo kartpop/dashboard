@@ -1,6 +1,6 @@
+import { AppShell } from "./AppShell";
 import { SignInPage } from "./auth/SignInPage";
 import { useAuth } from "./auth/useAuth";
-import { DashboardPage } from "./DashboardPage";
 
 export function App() {
   const auth = useAuth();
@@ -10,5 +10,5 @@ export function App() {
   if (auth.status === "signedOut" || !auth.user) {
     return <SignInPage />;
   }
-  return <DashboardPage user={auth.user} onSignOut={auth.signOut} />;
+  return <AppShell user={auth.user} onSignOut={auth.signOut} />;
 }

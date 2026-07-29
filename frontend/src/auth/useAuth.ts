@@ -7,6 +7,8 @@ export interface Me {
   name: string | null;
   picture: string | null;
   is_superuser: boolean;
+  // Goal 11: whether the News feature is on for this user (drives the rail entry).
+  news_enabled?: boolean;
 }
 
 export type AuthStatus = "loading" | "signedOut" | "signedIn";

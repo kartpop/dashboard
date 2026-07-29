@@ -16,6 +16,7 @@ from __future__ import annotations
 
 # Import every table-defining module BEFORE create_all so all tables + FKs exist.
 import app.auth.models  # noqa: F401
+import app.news.models  # noqa: F401
 import app.overlay.models  # noqa: F401
 import app.router.models  # noqa: F401
 import pytest

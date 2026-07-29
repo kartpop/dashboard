@@ -2035,3 +2035,382 @@ h1, h2, h3 {
   cursor: pointer;
   color: var(--error);
 }
+.settings-allow-email {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-allow-features {
+  display: flex;
+  gap: 12px;
+  margin: 0 12px;
+  flex: 0 0 auto;
+}
+.settings-feature-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted, #666);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.settings-feature-toggle input {
+  cursor: pointer;
+}
+
+/* ── Goal 11: app shell (nav rail) + News view ─────────────────────────────── */
+
+/* The rail is the app's spine: a collapsed left strip switching Home | News, with
+   the account controls anchored bottom-left. The main area fills the rest and each
+   view manages its own scroll. */
+.app-shell {
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+}
+
+.app-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
+}
+
+.nav-rail {
+  flex-shrink: 0;
+  width: 76px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 8px;
+  border-right: 1px solid var(--border);
+  background: var(--muted-bg);
+}
+
+.nav-rail-top,
+.nav-rail-bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.nav-rail-logo {
+  width: 28px;
+  height: 28px;
+  margin-bottom: 8px;
+}
+
+.rail-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 2px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.rail-btn:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.rail-nav--active {
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  color: var(--text-h);
+}
+
+.rail-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.rail-label {
+  font-size: 11px;
+}
+
+.rail-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.rail-avatar--fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--border);
+  color: var(--text-h);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* News view -------------------------------------------------------------------- */
+.news-view {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.news-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.news-header h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.news-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.news-last-run {
+  font-size: 12px;
+  color: var(--done);
+}
+
+.news-profile-btn,
+.news-fetch-btn {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.news-fetch-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.news-error {
+  color: var(--error);
+  font-size: 13px;
+}
+
+.news-empty {
+  color: var(--done);
+  padding: 32px 0;
+  text-align: center;
+}
+
+.news-daygroup {
+  margin-bottom: 20px;
+}
+
+.news-dayhead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0 0 10px;
+  padding: 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--done);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.news-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  background: var(--bg);
+}
+
+.news-card--serendipity {
+  border-color: color-mix(in srgb, #a855f7 45%, var(--border));
+  background: color-mix(in srgb, #a855f7 5%, var(--bg));
+}
+
+.news-card-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--done);
+  margin-bottom: 6px;
+}
+
+.news-source {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.news-badge {
+  margin-left: auto;
+  font-size: 11px;
+  color: #a855f7;
+  font-weight: 600;
+}
+
+.news-domain {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--muted-bg);
+  color: var(--text);
+}
+
+.news-title {
+  display: block;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-h);
+  text-decoration: none;
+  line-height: 1.35;
+}
+
+.news-title:hover {
+  text-decoration: underline;
+}
+
+.news-why {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--text);
+  opacity: 0.8;
+}
+
+.news-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.news-vote,
+.news-comment-toggle {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 3px 10px;
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.news-vote--on {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+  border-color: color-mix(in srgb, var(--text) 30%, var(--border));
+}
+
+.news-comment-toggle--has {
+  border-color: color-mix(in srgb, var(--text) 30%, var(--border));
+}
+
+.news-comment-box {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+
+/* News profile drawer ---------------------------------------------------------- */
+.news-profile-drawer {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 18px;
+  background: var(--muted-bg);
+}
+
+.news-profile-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.news-profile-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.news-profile-close {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.news-profile-hint {
+  font-size: 12px;
+  color: var(--done);
+  margin: 6px 0 10px;
+}
+
+.news-profile-text {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  resize: vertical;
+}
+
+.news-profile-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.news-profile-actions button {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.news-profile-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.news-profile-flash {
+  font-size: 12px;
+  color: var(--done);
+}
+
+@media (max-width: 1080px) {
+  .app-main {
+    height: auto;
+  }
+}

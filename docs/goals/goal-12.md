@@ -2,9 +2,10 @@
 
 **One line:** The app shell grows up around the goal-11 nav rail: **settings moves out of
 its overlong page into a modal with its own internal side-nav** (Calendars · Notes &
-hierarchy · Allowed emails · News); the **allowed-emails panel becomes DB-backed per-user
-management with fine-grained feature flags** (chip-style email input, per-user "news
-enabled" toggle — killing goal-11's `NEWS_ENABLED_EMAILS` env var); and a **News settings
+hierarchy · Allowed emails · News); the **allowed-emails panel becomes richer DB-backed
+per-user management with fine-grained feature flags** (chip-style email input, per-user
+feature toggles — building on goal 11's `allowed_email.features` column + News checkbox,
+which already replaced the `NEWS_ENABLED_EMAILS` env var); and a **News settings
 panel** gives the profile doc a real home — view/edit, a **braindump box + "recreate
 profile from braindump" LLM action**, and a **feed/domain chip picker** that snaps to a
 curated catalog of known-good sources as you type.
@@ -41,9 +42,10 @@ endpoints.
   - UI per the reference screenshot: chip-style multi-email input (paste-friendly,
     validated), an add action, a user list with per-user flag toggles. Owner-only:
     non-owner users never see this panel and the endpoints 403 them.
-  - **Kills `NEWS_ENABLED_EMAILS`**: goal 11's env gate is replaced by the flag; the news
-    endpoints' guard reads the flag. Same-commit removal of the env var from
-    deploy docs/owner steps.
+  - **Feature flags already DB-backed (goal 11)**: `allowed_email.features` + the News
+    checkbox + `auth.service.FEATURES` registry already replaced `NEWS_ENABLED_EMAILS`.
+    Goal 12 only enriches the management UI (chip input, more features) over that column —
+    no env var to remove.
 - **3. News settings panel.**
   - **Profile doc**: rendered + editable (the goal-11 in-view drawer moves here and the
     drawer dies). Shows the retained previous version with a one-click revert.
@@ -103,8 +105,8 @@ endpoints.
 - **Users & flags:** owner adds two emails via the chip input in one action; each appears
   with a `news_enabled` toggle; flipping it on/off takes effect without redeploy (rail
   entry appears/disappears on next load; endpoints 403 when off — endpoint test);
-  non-owner gets no panel and 403s on the management endpoints; `NEWS_ENABLED_EMAILS` is
-  gone from code and docs.
+  non-owner gets no panel and 403s on the management endpoints. (`NEWS_ENABLED_EMAILS`
+  was already removed in goal 11 — the flag lives in `allowed_email.features`.)
 - **News settings:** profile doc edits persist; revert restores the retained previous
   version; braindump → recreate shows a proposal that is saved **only** on accept (test:
   discard leaves the stored profile byte-identical); prompt builder still serializes no
@@ -123,6 +125,6 @@ endpoints.
   pattern).
 - `verifier-web`: settings-modal navigation, flag-toggle effect, news-settings checks;
   re-point the old settings-page checks.
-- Deploy/owner docs: `NEWS_ENABLED_EMAILS` removal, allowlist migration note
-  (`goal-12-owner-steps.md` if owner actions surface).
+- Deploy/owner docs: allowlist/feature-flag management note (`goal-12-owner-steps.md` if
+  owner actions surface). (`NEWS_ENABLED_EMAILS` was already removed in goal 11.)
 - Record rule fire/no-fire (`/context`); wrap-up to the planning chat.

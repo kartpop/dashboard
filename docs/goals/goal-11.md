@@ -31,9 +31,12 @@ changes.
 ## What ships
 
 - **1. Ingest layer (deterministic code, daily cron).** A `news` backend module with an
-  APScheduler job (same in-process pattern as the goal-5 router scheduler) that runs once
-  daily (IST morning) plus a manual `fetch-now` endpoint for testing:
-  - **Curated RSS feeds** (`feedparser`): a per-user feed list stored in `user_settings`,
+  in-process asyncio scheduler (same pattern as the goal-5 router scheduler — **not**
+  APScheduler; no new dependency, as-built) that runs once daily (IST morning) plus a
+  manual `fetch-now` endpoint for testing:
+  - **Curated RSS feeds** (`feedparser`): a per-user feed list stored in `news_profile`
+    (a dedicated per-user table rather than `user_settings`, as-built — keeps all news
+    persistence in the news module),
     seeded with a code-shipped default set (e.g. Ars Technica, The Verge, MIT Tech Review,
     Quanta, Nature News, IEEE Spectrum, arXiv cs.AI/cs.LG, the Anthropic/OpenAI/DeepMind
     blogs, Google News RSS *search* feeds as best-effort extras). Editing the list from the
@@ -102,10 +105,14 @@ changes.
     (available for a small caption/pill) but v1 stays a single flat chronological list —
     topic sub-headers / filter chips are a deliberate later polish, not built here (a ~15-
     item list doesn't need sectioning yet).
-- **5. Access gating (v1-simple).** News is off by default; a `NEWS_ENABLED_EMAILS` env
-  allowlist (subset of `ALLOWED_EMAILS`) turns it on per user. Fine-grained per-user
-  feature flags in the DB with an owner UI are **goal 12** — this env var is their
-  placeholder and dies there.
+- **5. Access gating.** *(As-built — revised from the original `NEWS_ENABLED_EMAILS` env
+  sketch.)* News is a **per-user feature flag stored on the `allowed_email` row** (JSON
+  `features` column, e.g. `{"news": true}`), toggled by the superuser in the admin UI
+  (Settings → Allowed emails → News checkbox). **Any superuser always has News on.** The
+  mechanism is generic (`auth.service.FEATURES` registry → the UI renders a checkbox per
+  entry), so goal 12 extends rather than replaces it. There is **no env var** for news
+  access. `gating.is_news_enabled(session, user)` → `auth.service.is_feature_enabled`;
+  `require_news_enabled` 403s non-enabled users; `/auth/me` reports `news_enabled`.
 - **6. Guardrail artifacts in lockstep.** The AST write-dependency test is unchanged in
   surface and re-asserted (news adds **zero** Google API calls — it is entirely
   non-Google); a new `news.md` rule (or a `router.md` section) records the news-LLM

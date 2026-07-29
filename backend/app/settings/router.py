@@ -165,6 +165,11 @@ def _allowed_out(row) -> dict:
         "email": row.email,
         "added_by": row.added_by,
         "created_at": row.created_at.isoformat(),
+        # Per-user feature flags (goal 11): every known key present, defaulting False.
+        "features": {
+            key: auth_svc.parse_features(row.features).get(key, False)
+            for key in auth_svc.FEATURE_KEYS
+        },
     }
 
 
@@ -172,12 +177,22 @@ class AllowedEmailCreate(BaseModel):
     email: str
 
 
+class FeatureUpdate(BaseModel):
+    feature: str
+    enabled: bool
+
+
 @router.get("/allowed-emails")
 async def list_allowed(
     superuser: User = Depends(require_superuser),
     session: Session = Depends(get_session),
 ):
-    return {"allowed": [_allowed_out(r) for r in auth_svc.list_allowed(session)]}
+    return {
+        # The togglable feature registry, so the UI renders a checkbox per feature
+        # without hard-coding names (goal 11; goal 12 generalises per-user flags).
+        "features": [{"key": k, "label": label} for k, label in auth_svc.FEATURES],
+        "allowed": [_allowed_out(r) for r in auth_svc.list_allowed(session)],
+    }
 
 
 @router.post("/allowed-emails", status_code=201)
@@ -207,3 +222,22 @@ async def remove_allowed(
             "That email is not removable (unknown, or the superuser's own).",
         )
     return {"ok": True}
+
+
+@router.put("/allowed-emails/{email}/features")
+async def set_feature(
+    email: str,
+    body: FeatureUpdate,
+    superuser: User = Depends(require_superuser),
+    session: Session = Depends(get_session),
+):
+    """Toggle one per-user feature flag (e.g. News) on an allowlisted email."""
+    try:
+        row = auth_svc.set_feature(session, email, body.feature, body.enabled)
+    except KeyError as exc:
+        raise ApiError(
+            400, "unknown_feature", f"Unknown feature: {body.feature}"
+        ) from exc
+    except LookupError as exc:
+        raise ApiError(404, "not_found", "That email is not on the allowlist.") from exc
+    return _allowed_out(row)

@@ -46,6 +46,11 @@ class AllowedEmail(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     email: str = Field(index=True, unique=True, max_length=320)
     added_by: Optional[str] = Field(default=None, max_length=320)  # superuser email
+    # Per-user feature flags (goal 11), a JSON object of feature-name -> bool, e.g.
+    # {"news": true}. The superuser edits these alongside the invite list; the
+    # superuser themselves always has every feature on (no row needed). Replaces the
+    # NEWS_ENABLED_EMAILS env var. Unknown/missing keys read as False.
+    features: str = Field(default="{}")
     created_at: datetime = Field(default_factory=_utcnow, nullable=False)
 
 
