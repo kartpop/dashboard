@@ -20,6 +20,7 @@ from app.auth import service as auth_svc
 from app.auth.deps import get_current_user
 from app.auth.models import User
 from app.db import get_session
+from app.dev import gating as dev_gating
 from app.google import auth as google_auth
 from app.news import gating as news_gating
 
@@ -105,4 +106,7 @@ async def me(
         # their allowlist row; superusers always). The frontend shows the News rail
         # entry only when true; /news 403s otherwise.
         "news_enabled": news_gating.is_news_enabled(session, user),
+        # Goal 12: whether the Dev feature is on for this user (drives the Dev rail
+        # entry). The flag gates /dev/* endpoints and the scheduled scan identically.
+        "dev_enabled": dev_gating.is_dev_enabled(session, user),
     }

@@ -526,6 +526,18 @@ def test_docs_module_write_surface_is_insert_only():
         assert "update" not in _calls_in_function(docs_mod, other), other
 
 
+def test_docs_get_document_is_read_only():
+    """Goal 12: the ONE sanctioned Docs read path — `documents().get` inside
+    `_get_document` — carries no write method (no batchUpdate/create/update/delete), so
+    the dev-view entry scan reads app-created Docs without touching the write surface."""
+    from app.google import docs as docs_mod
+
+    read_calls = _calls_in_function(docs_mod, "_get_document")
+    assert "get" in read_calls
+    for write in ("batchUpdate", "create", "update", "delete"):
+        assert write not in read_calls, write
+
+
 def test_rename_file_body_is_name_only(monkeypatch):
     """The rename request body is EXACTLY `{"name": ...}` — never content, parents,
     or trashed (goal 9 pinned unit test)."""

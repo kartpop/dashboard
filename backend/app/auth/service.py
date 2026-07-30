@@ -19,7 +19,7 @@ from app.google import auth as google_auth
 # Per-user, superuser-togglable features (goal 11). Add a (key, label) pair here and
 # the admin UI renders a checkbox for it automatically; nothing else needs to change.
 # The superuser always has every feature on regardless of this map.
-FEATURES: tuple[tuple[str, str], ...] = (("news", "News"),)
+FEATURES: tuple[tuple[str, str], ...] = (("news", "News"), ("dev", "Dev"))
 FEATURE_KEYS: frozenset[str] = frozenset(key for key, _ in FEATURES)
 
 

@@ -9,6 +9,8 @@ export interface Me {
   is_superuser: boolean;
   // Goal 11: whether the News feature is on for this user (drives the rail entry).
   news_enabled?: boolean;
+  // Goal 12: whether the Dev feature is on for this user (drives the Dev rail entry).
+  dev_enabled?: boolean;
 }
 
 export type AuthStatus = "loading" | "signedOut" | "signedIn";

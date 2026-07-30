@@ -131,6 +131,36 @@ def canonical_path(chain: list[dict[str, Any]]) -> str:
     return "/".join((n.get("name") or "").strip() for n in chain)
 
 
+def selected_doc_leaves(
+    forest: list[dict[str, Any]], node_ids: set[str]
+) -> list[dict[str, Any]]:
+    """Resolve selected `node_id`s → the concrete Doc leaves they cover (goal 12).
+
+    A selected **Doc** node contributes itself; a selected **folder** contributes
+    *every* Doc under it, recursively — so a folder selection auto-includes a Doc added
+    beneath it later (resolution happens at scan time against the live index). Returns
+    `[{drive_id, path}]`, de-duplicated by `drive_id` (a Doc selected both directly and
+    via an ancestor folder appears once); leaves with no materialized `drive_id` are
+    skipped. Order is depth-first, stable. Never trusts an id from a payload — drive_ids
+    come from the stored index only.
+    """
+    out: dict[str, str] = {}
+
+    def walk(nodes: list[dict[str, Any]], prefix: list[str], under: bool) -> None:
+        for n in nodes:
+            path = prefix + [(n.get("name") or "").strip()]
+            selected = under or (n.get("node_id") in node_ids)
+            if n.get("kind") == KIND_DOC:
+                drive_id = n.get("drive_id")
+                if selected and drive_id and drive_id not in out:
+                    out[drive_id] = "/".join(path)
+            else:
+                walk(n.get("children") or [], path, selected)
+
+    walk(forest, [], False)
+    return [{"drive_id": did, "path": path} for did, path in out.items()]
+
+
 # ── Validation (422 on violation) ─────────────────────────────────────────────
 
 

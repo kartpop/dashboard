@@ -1,10 +1,11 @@
 import { useState } from "react";
 import type { Me } from "./auth/useAuth";
 import { DashboardPage } from "./DashboardPage";
+import { DevView } from "./dev/DevView";
 import { NewsView } from "./news/NewsView";
 import { SettingsPage } from "./settings/SettingsPage";
 
-type View = "home" | "news";
+type View = "home" | "news" | "dev";
 
 /**
  * The app shell (goal 11): a collapsed left nav rail is now the app's spine. It
@@ -23,9 +24,13 @@ export function AppShell({
   const [view, setView] = useState<View>("home");
   const [showSettings, setShowSettings] = useState(false);
   const newsEnabled = user.news_enabled === true;
+  const devEnabled = user.dev_enabled === true;
 
-  // If News gets disabled out from under the current view, fall back Home.
-  const activeView: View = view === "news" && !newsEnabled ? "home" : view;
+  // If a feature gets disabled out from under the current view, fall back Home.
+  const activeView: View =
+    (view === "news" && !newsEnabled) || (view === "dev" && !devEnabled)
+      ? "home"
+      : view;
 
   return (
     <div className="app-shell">
@@ -44,6 +49,14 @@ export function AppShell({
               icon="📰"
               active={activeView === "news"}
               onClick={() => setView("news")}
+            />
+          )}
+          {devEnabled && (
+            <RailButton
+              label="Dev"
+              icon="🛠"
+              active={activeView === "dev"}
+              onClick={() => setView("dev")}
             />
           )}
         </div>
@@ -75,7 +88,13 @@ export function AppShell({
       </nav>
 
       <div className="app-main">
-        {activeView === "home" ? <DashboardPage /> : <NewsView />}
+        {activeView === "home" ? (
+          <DashboardPage />
+        ) : activeView === "news" ? (
+          <NewsView />
+        ) : (
+          <DevView />
+        )}
       </div>
 
       {showSettings && (

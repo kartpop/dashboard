@@ -88,6 +88,29 @@ async def file_accessible(creds: "Credentials", file_id: str) -> bool:
     return await asyncio.to_thread(_file_accessible, creds, file_id)
 
 
+# ── The sanctioned Docs READ (goal 12: the dev-view entry scan) ───────────────
+
+
+def _get_document(creds: "Credentials", doc_id: str) -> dict:
+    """Read an app-created Doc's full structured content (`documents.get`).
+
+    The app's FIRST Docs read path (goal 12). No scope change: `drive.file` grants
+    read *and* write on files the app created, and every Doc the app can reach is
+    app-created (the create path hard-codes the notes folder as parent), so reading
+    one back is already inside the granted scope. This is a **read** — no `batchUpdate`,
+    no mutation — used only to parse entries for the issue-draft synthesiser. The Docs
+    *write* surface (insert-only `batchUpdate`) is untouched; the AST test pins this as
+    a read (`documents().get`, never a write method inside `_get_document`).
+    """
+    service = _docs_service(creds)
+    return service.documents().get(documentId=doc_id).execute()
+
+
+async def get_document(creds: "Credentials", doc_id: str) -> dict:
+    """Return an app-created Doc's structured content for the dev-view entry scan."""
+    return await asyncio.to_thread(_get_document, creds, doc_id)
+
+
 # ── Insert-only note write (Docs batchUpdate) ─────────────────────────────────
 
 

@@ -2414,3 +2414,411 @@ h1, h2, h3 {
     height: auto;
   }
 }
+
+/* Dev view (goal 12) --------------------------------------------------------- */
+.dev-view {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.dev-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.dev-header h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.dev-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dev-last-run {
+  font-size: 12px;
+  color: var(--done);
+}
+
+.dev-config-btn,
+.dev-scan-btn {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dev-scan-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.dev-error {
+  color: var(--error);
+  font-size: 13px;
+}
+
+.dev-empty {
+  color: var(--done);
+  padding: 32px 0;
+  text-align: center;
+}
+
+.dev-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dev-settled {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dev-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: var(--bg);
+}
+
+.dev-card--filed {
+  border-color: color-mix(in srgb, #22c55e 40%, var(--border));
+  background: color-mix(in srgb, #22c55e 5%, var(--bg));
+}
+
+.dev-card--dismissed {
+  opacity: 0.55;
+}
+
+.dev-card-title {
+  width: 100%;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-h);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 4px 8px;
+  background: transparent;
+  font-family: inherit;
+}
+
+.dev-card-title:focus {
+  border-color: var(--border);
+  background: var(--bg);
+  outline: none;
+}
+
+.dev-card-title--static {
+  padding: 4px 8px;
+}
+
+.dev-card-body {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.dev-card-body--static {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+}
+
+.dev-card-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.dev-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--done);
+}
+
+.dev-field select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--text);
+  min-width: 200px;
+}
+
+.dev-card-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.dev-source-chip {
+  font-size: 11px;
+  color: var(--done);
+  background: var(--muted-bg);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.dev-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.dev-file-btn {
+  border: 1px solid color-mix(in srgb, #22c55e 45%, var(--border));
+  background: color-mix(in srgb, #22c55e 12%, var(--bg));
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dev-dismiss-btn,
+.dev-retry-btn {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dev-file-btn:disabled,
+.dev-dismiss-btn:disabled,
+.dev-retry-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.dev-issue-link {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.dev-dismissed-tag {
+  font-size: 12px;
+  color: var(--done);
+}
+
+/* Dev config drawer ---------------------------------------------------------- */
+.dev-config-drawer {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  background: var(--muted-bg);
+}
+
+.dev-config-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.dev-config-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.dev-config-close {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.dev-config-section {
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+.dev-config-section h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.dev-config-hint {
+  font-size: 12px;
+  color: var(--done);
+  margin: 4px 0 8px;
+}
+
+.dev-config-row,
+.dev-token-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+}
+
+.dev-token-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.dev-token-owner {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.dev-token-hint {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+
+.dev-token-login {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dev-token-remove {
+  margin-left: auto;
+}
+
+.dev-pat-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dev-config-flash {
+  font-size: 12px;
+  color: var(--done);
+}
+
+.dev-config-drawer button {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dev-config-drawer button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.dev-pat-input,
+.dev-repo-desc {
+  flex: 1;
+  min-width: 200px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.dev-repo-list,
+.dev-tree {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+
+.dev-repo-item {
+  padding: 6px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.dev-repo-tick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dev-repo-name {
+  font-weight: 600;
+}
+
+.dev-repo-detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 0 24px;
+}
+
+.dev-repo-default {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--done);
+}
+
+.dev-project-picker select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.dev-tree {
+  font-size: 13px;
+}
+
+.dev-tree-children {
+  list-style: none;
+  padding-left: 20px;
+  margin: 0;
+}
+
+.dev-tree-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.dev-tree-name--folder {
+  font-weight: 600;
+}
