@@ -40,7 +40,7 @@ changes.
     seeded with a code-shipped default set (e.g. Ars Technica, The Verge, MIT Tech Review,
     Quanta, Nature News, IEEE Spectrum, arXiv cs.AI/cs.LG, the Anthropic/OpenAI/DeepMind
     blogs, Google News RSS *search* feeds as best-effort extras). Editing the list from the
-    UI is **goal 12**; v1 edits go through the DB/seed.
+    UI is **goal 13**; v1 edits go through the DB/seed.
   - **Hacker News** via the official Firebase/Algolia API (front-page + top stories — free,
     no key).
   - **The Guardian Open Platform** (free developer key, `GUARDIAN_API_KEY` env): 1–2
@@ -80,11 +80,11 @@ changes.
   (single-slot history) so a bad rewrite is one manual revert away. The profile doc is
   markdown in `user_settings` — human-readable and hand-editable; a minimal raw-text editor
   for it lives *inside the News view* for now (a small "Profile" drawer/section — the full
-  settings treatment with braindump + LLM-recreate is **goal 12**).
+  settings treatment with braindump + LLM-recreate is **goal 13**).
 - **4. Frontend: the nav rail + the News view.** The app gains its first second view:
   - A **collapsed left nav rail**: Home (today's dashboard, unchanged) and News; **login /
     settings anchor at the bottom-left** of the rail. The existing settings page is reached
-    from there but is otherwise **untouched** — the settings-modal restructure is goal 12.
+    from there but is otherwise **untouched** — the settings-modal restructure is goal 13.
   - **News view = a vertical list of cards, grouped by run-day.** A date header spines each
     run (`Today · Mon 28 Jul`, then `Yesterday`, …); newest run first. A view header shows
     the last-run time + a manual **Fetch now** (dev/owner affordance, same spirit as
@@ -110,7 +110,7 @@ changes.
   `features` column, e.g. `{"news": true}`), toggled by the superuser in the admin UI
   (Settings → Allowed emails → News checkbox). **Any superuser always has News on.** The
   mechanism is generic (`auth.service.FEATURES` registry → the UI renders a checkbox per
-  entry), so goal 12 extends rather than replaces it. There is **no env var** for news
+  entry), so goal 13 extends rather than replaces it. There is **no env var** for news
   access. `gating.is_news_enabled(session, user)` → `auth.service.is_feature_enabled`;
   `require_news_enabled` 403s non-enabled users; `/auth/me` reports `news_enabled`.
 - **6. Guardrail artifacts in lockstep.** The AST write-dependency test is unchanged in
@@ -151,13 +151,13 @@ changes.
   two see no Google data, ever.
 - **New view = nav rail now, settings restructure later.** The rail ships here because News
   needs somewhere to live; everything else about the shell (settings modal + its side nav,
-  per-user flags UI, news settings panel) is goal 12.
+  per-user flags UI, news settings panel) is goal 13.
 
 ## Out of scope (do not build)
 
-- The settings modal, its internal side-nav, and any settings restructure (goal 12).
-- Braindump → LLM-recreate profile flow, and the news-domain chip picker UI (goal 12).
-- Fine-grained per-user feature flags in DB + owner admin UI (goal 12; env var here).
+- The settings modal, its internal side-nav, and any settings restructure (goal 13).
+- Braindump → LLM-recreate profile flow, and the news-domain chip picker UI (goal 13).
+- Fine-grained per-user feature flags in DB + owner admin UI (goal 13; env var here).
 - NewsData.io (or any keyed aggregator beyond Guardian), SerpAPI, Tavily/Exa
   "dig deeper" actions.
 - **Fetching article bodies** — any HTTP request to an article page for its full text

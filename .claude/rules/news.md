@@ -72,7 +72,7 @@ admin UI renders a checkbox for it automatically — no other change. `gating.is
 enabled(session, user)` delegates to `auth.service.is_feature_enabled(session, user,
 "news")`; `routers/news.py::require_news_enabled` 403s every `/news` endpoint for a
 non-enabled user; `/auth/me` reports `news_enabled` so the frontend hides the rail entry.
-The earlier `NEWS_ENABLED_EMAILS` env var is **gone** — never reintroduce it. **Goal 12
+The earlier `NEWS_ENABLED_EMAILS` env var is **gone** — never reintroduce it. **Goal 13
 generalises this per-user feature-flag surface.**
 
 ## Feed catalog
@@ -80,4 +80,4 @@ generalises this per-user feature-flag surface.**
 `config.DEFAULT_FEEDS` is a **code-shipped, hand-curated** name→URL map — the source
 allowlist IS the authenticity guarantee, so it is reviewed at PR time, never fetched or
 LLM-generated. A per-user override lives in `news_profile.feeds_json`; a UI chip editor
-over the catalog is goal 12.
+over the catalog is goal 13.

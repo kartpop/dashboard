@@ -32,7 +32,7 @@ News already cover most of the feed. To add the Guardian:
 
 - [ ] Skim `backend/app/news/config.py` → `DEFAULT_FEEDS`. This hand-curated name→URL map
       **is** the authenticity guarantee (you chose the sources). Add/remove feeds in code
-      and restart. (A per-user chip editor over this catalog is goal 12.)
+      and restart. (A per-user chip editor over this catalog is goal 13.)
 - [ ] A dead/renamed feed URL is logged and skipped, never fatal — but a feed that 404s
       every run contributes nothing, so prune it.
 
