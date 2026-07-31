@@ -15,9 +15,14 @@ import os
 # The synthesising LLM. Opus by default (see module docstring); env-overridable.
 DEV_MODEL = os.environ.get("DEV_MODEL", "claude-opus-4-8")
 
-# Output-budget cap. A day's worth of drafts is a modest structured payload, but the
-# body_markdown fields add up — keep generous headroom.
-DEV_MAX_TOKENS = int(os.environ.get("DEV_MAX_TOKENS", "8192"))
+# Output-budget cap for the synthesiser. A day's drafts are a structured payload whose
+# body_markdown fields add up fast — dense JSON tokenises at ~2.5 chars/token, so the old
+# 8192 truncated on a busy day (the cut-off JSON fails to parse and the whole scan yields
+# no drafts). `synth.py` streams, so this is not bounded by the ~16k non-streaming HTTP
+# timeout; 32000 comfortably covers normal scans. A first run with a long backlog (many
+# days of notes at once) can emit far more — set DEV_MAX_TOKENS=64000 for that scan. It's
+# only a ceiling (you pay for tokens actually generated), so a high value is harmless.
+DEV_MAX_TOKENS = int(os.environ.get("DEV_MAX_TOKENS", "32000"))
 
 # How many still-open drafts / recently-filed issue titles to feed the model as
 # do-not-redraft context (cross-scan dedup). Newest-first truncation.

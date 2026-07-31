@@ -114,14 +114,36 @@ async def synthesise(
         system, user = build_prompt(
             build_entry_payload(entries), repo_catalog, do_not_redraft
         )
-        resp = await client.messages.parse(
+        # Stream rather than messages.parse: a first-run backlog (many days of notes in
+        # one call) emits a large drafts payload, and a big max_tokens on a non-streaming
+        # call risks an SDK HTTP timeout. Streaming lifts that ceiling; output_format keeps
+        # the same structured-output guarantee (schema enforced, message.parsed_output set).
+        async with client.messages.stream(
             model=config.DEV_MODEL,
             max_tokens=config.DEV_MAX_TOKENS,
             system=system,
             messages=[{"role": "user", "content": user}],
             output_format=SynthesisResult,
-        )
-        return resp.parsed_output or SynthesisResult(issues=[])
+        ) as stream:
+            message = await stream.get_final_message()
+        if message.stop_reason == "max_tokens":
+            # Output truncated before the JSON closed. The caller only advances the cursor
+            # after drafts persist, so returning empty simply re-scans next run — bump
+            # DEV_MAX_TOKENS (currently %d) and rerun to recover the backlog.
+            _log.error(
+                "dev synthesis truncated at max_tokens=%d — no drafts this scan; "
+                "raise DEV_MAX_TOKENS and rescan",
+                config.DEV_MAX_TOKENS,
+            )
+            return SynthesisResult(issues=[])
+        return message.parsed_output or SynthesisResult(issues=[])
     except Exception:
-        _log.exception("dev synthesis call failed; no drafts this scan")
+        # A JSON/EOF parse error here means the response was truncated mid-payload
+        # (raise DEV_MAX_TOKENS, currently %d) — otherwise it's a model/refusal hiccup.
+        _log.exception(
+            "dev synthesis call failed; no drafts this scan "
+            "(if a JSON/EOF parse error, the response was truncated — "
+            "raise DEV_MAX_TOKENS, currently %d)",
+            config.DEV_MAX_TOKENS,
+        )
         return SynthesisResult(issues=[])
