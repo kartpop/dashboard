@@ -74,6 +74,10 @@ async def _tick_all_users() -> None:
 
 
 async def _loop() -> None:
+    # Let the app finish booting before the first (possibly heavy) tick, so news ingest
+    # never competes with startup/healthcheck. The router scheduler sleeps a full
+    # interval first; news keeps the first run timely with a short grace delay instead.
+    await asyncio.sleep(config.SCHEDULER_STARTUP_DELAY)
     while True:
         try:
             await _tick_all_users()

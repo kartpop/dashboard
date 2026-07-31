@@ -232,7 +232,10 @@ async def _fetch_json(url: str) -> Any:
 
 
 async def fetch_rss(url: str, feed_name: str) -> list[RawItem]:
-    return parse_rss(await _fetch_text(url), feed_name)
+    text = await _fetch_text(url)
+    # feedparser is synchronous CPU work, unbounded by feed size — keep it off the event
+    # loop so a large feed can't stall request handling (the scheduler runs this at boot).
+    return await asyncio.to_thread(parse_rss, text, feed_name)
 
 
 async def fetch_hn() -> list[RawItem]:
@@ -285,7 +288,8 @@ async def fetch_all(feed_urls: list[str]) -> list[RawItem]:
     tasks.append(_safe("guardian", fetch_guardian()))
     results = await asyncio.gather(*tasks)
     items: list[RawItem] = [it for group in results for it in group]
-    return dedupe(items)
+    # dedupe is O(n²) SequenceMatcher over every candidate pair — offload from the loop.
+    return await asyncio.to_thread(dedupe, items)
 
 
 def _feed_name_for(url: str) -> str:

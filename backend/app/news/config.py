@@ -56,6 +56,11 @@ SCHEDULER_ENABLED = os.environ.get("NEWS_SCHEDULER_ENABLED", "1") not in (
     "",
 )
 SCHEDULER_INTERVAL = float(os.environ.get("NEWS_SCHEDULER_INTERVAL", "1800"))
+# Grace delay before the FIRST tick, so the app finishes booting (migrations, health)
+# before a — possibly heavy — ingest runs; otherwise the first run competes with startup
+# and stalls the healthcheck. The router scheduler sleeps a full interval first; news
+# keeps the first run timely with a short grace instead (per-run CPU is thread-offloaded).
+SCHEDULER_STARTUP_DELAY = float(os.environ.get("NEWS_SCHEDULER_STARTUP_DELAY", "30"))
 # The daily run fires when it is at/after this IST hour AND ≥ DAILY_MIN_HOURS since the
 # last run. The first run (no bookmark) fires immediately regardless of the hour.
 DAILY_HOUR_IST = int(os.environ.get("NEWS_DAILY_HOUR_IST", "7"))
