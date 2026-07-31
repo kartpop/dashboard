@@ -181,6 +181,37 @@ def test_scan_twice_sends_zero_on_second_pass(monkeypatch, session, user_a):
     assert len(calls) == 1  # no second LLM call — nothing new to synthesise
 
 
+def test_synth_failure_leaves_cursor_unadvanced_for_retry(monkeypatch, session, user_a):
+    """A failed synthesis (returns None — e.g. truncated at max_tokens) must NOT advance
+    the cursor: the same entries re-scan next run rather than being silently consumed. A
+    real result (even empty) is a success and would advance; only None holds the cursor."""
+    _seed_config(session, user_a, sources=["f1"], repos=_REPOS, docs_forest=_FOREST)
+    docs = {
+        "DOC1": _doc(
+            ("Fix login", "6-July-2026, 8:41 PM IST", "auth", "cannot log in")
+        ),
+        "DOC2": _doc(("Dark mode", "6-July-2026, 3:00 PM IST", None, "requested")),
+    }
+    _patch_docs(monkeypatch, docs)
+
+    calls: list = []
+
+    async def failing_synth(entries, catalog, dnr):
+        calls.append(entries)
+        return None  # synthesis failed (truncation / model error)
+
+    monkeypatch.setattr(dev_svc.synth, "synthesise", failing_synth)
+
+    t1 = run(dev_svc.run_scan(session, user_a, DummyCreds()))
+    assert t1["new_entries"] == 2
+    assert len(calls) == 1
+
+    # Cursor was NOT advanced — the same two entries are presented to the LLM again.
+    t2 = run(dev_svc.run_scan(session, user_a, DummyCreds()))
+    assert t2["new_entries"] == 2
+    assert len(calls) == 2
+
+
 def test_same_minute_entry_captured_after_scan_processed_once(
     monkeypatch, session, user_a
 ):

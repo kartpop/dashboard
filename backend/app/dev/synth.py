@@ -101,12 +101,15 @@ async def synthesise(
     entries: list[dict],
     repo_catalog: list[dict],
     do_not_redraft: list[str],
-) -> SynthesisResult:
+) -> SynthesisResult | None:
     """Ask the LLM to synthesise the new entries into de-duplicated issue drafts.
 
-    Returns an empty result on any failure (never raises) — a model hiccup yields no
-    drafts this scan rather than a crash; the cursor is only advanced by the caller
-    after drafts persist, so the entries are simply re-scanned next run."""
+    Never raises. Returns a `SynthesisResult` on success — **including an empty one when
+    the model legitimately finds no actionable work** — and `None` on *failure* (the call
+    errored, or the response was truncated at max_tokens). The distinction matters: the
+    caller advances the per-doc cursor only when this returns a result, so a failure leaves
+    the entries un-consumed and they are re-scanned next run. A swallowed failure that
+    returned an empty result would advance the cursor and silently lose the entries."""
     if not entries:
         return SynthesisResult(issues=[])
     try:
@@ -127,23 +130,24 @@ async def synthesise(
         ) as stream:
             message = await stream.get_final_message()
         if message.stop_reason == "max_tokens":
-            # Output truncated before the JSON closed. The caller only advances the cursor
-            # after drafts persist, so returning empty simply re-scans next run — bump
-            # DEV_MAX_TOKENS (currently %d) and rerun to recover the backlog.
+            # Output truncated before the JSON closed → failure, not "no drafts". Return
+            # None so the caller leaves the cursor unadvanced and the backlog re-scans;
+            # bump DEV_MAX_TOKENS (currently %d) and rerun to recover it.
             _log.error(
-                "dev synthesis truncated at max_tokens=%d — no drafts this scan; "
+                "dev synthesis truncated at max_tokens=%d — cursor left unadvanced; "
                 "raise DEV_MAX_TOKENS and rescan",
                 config.DEV_MAX_TOKENS,
             )
-            return SynthesisResult(issues=[])
+            return None
         return message.parsed_output or SynthesisResult(issues=[])
     except Exception:
         # A JSON/EOF parse error here means the response was truncated mid-payload
         # (raise DEV_MAX_TOKENS, currently %d) — otherwise it's a model/refusal hiccup.
+        # Either way this is a failure: return None so the cursor stays put and re-scans.
         _log.exception(
-            "dev synthesis call failed; no drafts this scan "
+            "dev synthesis call failed; cursor left unadvanced "
             "(if a JSON/EOF parse error, the response was truncated — "
             "raise DEV_MAX_TOKENS, currently %d)",
             config.DEV_MAX_TOKENS,
         )
-        return SynthesisResult(issues=[])
+        return None

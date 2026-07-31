@@ -459,6 +459,7 @@ async def run_scan(session: Session, user: "User", creds: "Credentials") -> dict
             )
 
     stored = 0
+    synth_failed = False
     if batch:
         catalog = get_repos(cfg)
         catalog_names = {r["full_name"] for r in catalog}
@@ -470,18 +471,32 @@ async def run_scan(session: Session, user: "User", creds: "Credentials") -> dict
             ],
             _do_not_redraft_titles(session, user.id),
         )
-        stored = _dispose_synthesis(
-            session,
-            user.id,
-            result,
-            doc_id_by_path,
-            default_repo(cfg),
-            catalog_names,
-        )
+        if result is None:
+            # Synthesis failed (errored or truncated at max_tokens). Do NOT advance any
+            # cursor — leaving them put means these entries are re-scanned next run rather
+            # than silently consumed. A returned result (even empty) is a real answer.
+            synth_failed = True
+            _log.warning(
+                "dev scan: synthesis failed for user %s — cursors left unadvanced, "
+                "%d new entries will re-scan",
+                user.id,
+                len(batch),
+            )
+        else:
+            stored = _dispose_synthesis(
+                session,
+                user.id,
+                result,
+                doc_id_by_path,
+                default_repo(cfg),
+                catalog_names,
+            )
 
     # Advance every read doc's cursor AFTER drafts persisted (idempotent for no-delta docs).
-    for doc_id, entries in per_doc.items():
-        _advance_cursor(session, user.id, doc_id, entries)
+    # Skipped entirely on a synthesis failure so the batch is retried, not lost.
+    if not synth_failed:
+        for doc_id, entries in per_doc.items():
+            _advance_cursor(session, user.id, doc_id, entries)
 
     cfg.last_scan_at = _now()
     session.add(cfg)
