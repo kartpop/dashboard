@@ -54,34 +54,21 @@ h1, h2, h3 {
 }
 
 /* Header row: title left, calendar strip filling the remaining width (goal 7b).
-   Centered so the title lines up vertically with the strip's axis+daynav stack. */
+   The strip is a single row now (day-nav pill + axis), so the title centers
+   against that one row. The brand mark lives only on the nav rail. */
 .dashboard-header {
   display: flex;
   align-items: center;
-  gap: 24px;
-  margin-bottom: 24px;
+  gap: 20px;
+  margin-bottom: 20px;
   flex-shrink: 0;
-}
-
-/* Logo mark + title, kept together and un-shrunk so the calendar strip flexes
-   into the remaining width. Mark sized to roughly match the title's cap height. */
-.dashboard-brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
-.brand-logo {
-  width: 28px;
-  height: 28px;
-  display: block;
 }
 
 .dashboard-header h1 {
   font-size: 21px;
   margin: 0;
   line-height: 1.1;
+  flex-shrink: 0;
 }
 
 /* ── Goal 6 layout: resizable top row + collapsed Other tasks ──────────────── */
@@ -1276,12 +1263,15 @@ h1, h2, h3 {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
   font-size: 12px;
 }
 
 .strip-body {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: stretch;
   gap: 4px;
@@ -1576,22 +1566,32 @@ h1, h2, h3 {
   color: var(--error);
 }
 
-/* Day-navigation row under the axis. */
+/* Compact inline day-nav pill beside the title: ‹ chevron · date · › chevron. */
 .strip-daynav {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 12px;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
 }
 
 .strip-daypill {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   background: none;
   border: none;
   color: var(--done);
-  font-size: 11px;
+  font-size: 16px;
+  line-height: 1;
   cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 4px;
+  padding: 0;
+  border-radius: 6px;
 }
 
 .strip-daypill:hover {
@@ -1605,7 +1605,9 @@ h1, h2, h3 {
   color: var(--text-h);
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  padding: 0 4px;
+  white-space: nowrap;
 }
 
 .strip-today {
@@ -2082,13 +2084,13 @@ h1, h2, h3 {
 
 .nav-rail {
   flex-shrink: 0;
-  width: 76px;
+  width: 60px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  padding: 14px 8px;
+  padding: 14px 6px;
   border-right: 1px solid var(--border);
   background: var(--muted-bg);
 }
@@ -2102,10 +2104,34 @@ h1, h2, h3 {
   width: 100%;
 }
 
+/* The logo mark doubles as the Home button. The button carries the padding +
+   active/hover surface (matching the other rail items); the img is just the mark. */
+.rail-logo-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 2px;
+  margin-bottom: 8px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.rail-logo-btn:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.rail-logo-btn--active {
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+
 .nav-rail-logo {
   width: 28px;
   height: 28px;
-  margin-bottom: 8px;
+  display: block;
 }
 
 .rail-btn {
@@ -2135,6 +2161,17 @@ h1, h2, h3 {
 .rail-icon {
   font-size: 20px;
   line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Flat SVG nav icons: single 20px glyph, colour follows the button's text
+   colour so hover/active states tint them. */
+.rail-icon svg {
+  width: 20px;
+  height: 20px;
+  display: block;
 }
 
 .rail-label {

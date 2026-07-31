@@ -16,12 +16,10 @@ export function DashboardPage() {
 
   return (
     <main className="dashboard">
-      {/* Header row: title + today's calendar strip (goal 7b). */}
+      {/* Header row: title + today's calendar strip (goal 7b). The brand mark lives
+          only on the nav rail now, so the title stands alone here. */}
       <header className="dashboard-header">
-        <div className="dashboard-brand">
-          <img className="brand-logo" src="/logo-mark.svg" alt="" />
-          <h1>Dashboard</h1>
-        </div>
+        <h1>Dashboard</h1>
         <CalendarStrip />
       </header>
       {/* Full-width, resizable top row: My Tasks | Follow-ups | Scratchpad (goal

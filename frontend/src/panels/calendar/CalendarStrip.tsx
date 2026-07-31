@@ -1,10 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { layoutBlocks, type StripEvent } from "./layoutStrip";
-import {
-  shiftISODate,
-  useCalendarStrip,
-  type CalendarEvent,
-} from "./useCalendarStrip";
+import { useCalendarStrip, type CalendarEvent } from "./useCalendarStrip";
 
 const DEFAULT_START = 8 * 60; // 08:00
 const DEFAULT_END = 19 * 60; // 19:00
@@ -24,18 +20,12 @@ function fmtTime(iso: string): string {
   });
 }
 
-function fmtPill(iso: string): string {
+/** Compact viewed-date label for the inline day-nav pill, e.g. "Thu, 30 Jul". */
+function fmtViewed(iso: string): string {
   return new Date(`${iso}T00:00:00`).toLocaleDateString([], {
     weekday: "short",
     day: "numeric",
-  });
-}
-
-function fmtViewed(iso: string): string {
-  return new Date(`${iso}T00:00:00`).toLocaleDateString([], {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
+    month: "short",
   });
 }
 
@@ -213,6 +203,35 @@ export function CalendarStrip() {
 
   return (
     <div className="calendar-strip">
+      {/* Compact inline day-nav: ‹ · viewed date (+Today) · › — a single-row pill
+          beside the title, so the strip no longer stacks a second row. */}
+      <div className="strip-daynav">
+        <button
+          className="strip-daypill"
+          onClick={() => cal.shiftDay(-1)}
+          title="Previous day"
+          aria-label="Previous day"
+        >
+          ‹
+        </button>
+        <span className="strip-viewed">
+          {fmtViewed(cal.viewedDate)}
+          {!cal.isToday && (
+            <button className="strip-today" onClick={cal.goToday}>
+              Today
+            </button>
+          )}
+        </span>
+        <button
+          className="strip-daypill"
+          onClick={() => cal.shiftDay(1)}
+          title="Next day"
+          aria-label="Next day"
+        >
+          ›
+        </button>
+      </div>
+
       <div className="strip-body">
         <button
           className="strip-chevron"
@@ -357,24 +376,6 @@ export function CalendarStrip() {
           aria-label="Refresh calendar"
         >
           ⟳
-        </button>
-      </div>
-
-      {/* Day-navigation row: prev pill · viewed date (+Today) · next pill. */}
-      <div className="strip-daynav">
-        <button className="strip-daypill" onClick={() => cal.shiftDay(-1)}>
-          « {fmtPill(shiftISODate(cal.viewedDate, -1))}
-        </button>
-        <span className="strip-viewed">
-          {fmtViewed(cal.viewedDate)}
-          {!cal.isToday && (
-            <button className="strip-today" onClick={cal.goToday}>
-              Today
-            </button>
-          )}
-        </span>
-        <button className="strip-daypill" onClick={() => cal.shiftDay(1)}>
-          {fmtPill(shiftISODate(cal.viewedDate, 1))} »
         </button>
       </div>
 
