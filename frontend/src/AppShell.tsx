@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import type { Me } from "./auth/useAuth";
 import { DashboardPage } from "./DashboardPage";
 import { DevView } from "./dev/DevView";
@@ -102,6 +102,19 @@ export function AppShell({
   const newsEnabled = user.news_enabled === true;
   const devEnabled = user.dev_enabled === true;
 
+  // Keep each view mounted once visited so switching rails is instant and no
+  // panel refetches from scratch (see .claude/rules/frontend.md — no global store;
+  // hidden React subtrees retain their per-panel hook state). Home is the default
+  // view so it's mounted from the start; News/Dev mount only on first visit, so we
+  // don't eagerly fetch their data on page load.
+  const [visited, setVisited] = useState<Set<View>>(
+    () => new Set<View>(["home"]),
+  );
+  const navigate = useCallback((next: View) => {
+    setVisited((prev) => (prev.has(next) ? prev : new Set(prev).add(next)));
+    setView(next);
+  }, []);
+
   // If a feature gets disabled out from under the current view, fall back Home.
   const activeView: View =
     (view === "news" && !newsEnabled) || (view === "dev" && !devEnabled)
@@ -117,7 +130,7 @@ export function AppShell({
               separate "Home" nav item is gone. */}
           <button
             className={`rail-logo-btn${activeView === "home" ? " rail-logo-btn--active" : ""}`}
-            onClick={() => setView("home")}
+            onClick={() => navigate("home")}
             title="Home"
             aria-label="Home"
             aria-current={activeView === "home" ? "page" : undefined}
@@ -129,7 +142,7 @@ export function AppShell({
               label="News"
               icon={NAV_ICON.news}
               active={activeView === "news"}
-              onClick={() => setView("news")}
+              onClick={() => navigate("news")}
             />
           )}
           {devEnabled && (
@@ -137,7 +150,7 @@ export function AppShell({
               label="Dev"
               icon={NAV_ICON.dev}
               active={activeView === "dev"}
-              onClick={() => setView("dev")}
+              onClick={() => navigate("dev")}
             />
           )}
         </div>
@@ -169,12 +182,22 @@ export function AppShell({
       </nav>
 
       <div className="app-main">
-        {activeView === "home" ? (
+        {/* Every visited view stays mounted; only the active one is displayed
+            (`.view-pane` is display:contents, so the hidden ones drop out and the
+            visible one's root behaves as a direct child of .app-main). This keeps
+            per-panel state alive across rail switches — no refetch on return. */}
+        <div className="view-pane" hidden={activeView !== "home"}>
           <DashboardPage />
-        ) : activeView === "news" ? (
-          <NewsView />
-        ) : (
-          <DevView />
+        </div>
+        {visited.has("news") && (
+          <div className="view-pane" hidden={activeView !== "news"}>
+            <NewsView />
+          </div>
+        )}
+        {visited.has("dev") && (
+          <div className="view-pane" hidden={activeView !== "dev"}>
+            <DevView />
+          </div>
         )}
       </div>
 
