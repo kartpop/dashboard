@@ -1,20 +1,38 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatRelative } from "../formatDate";
 import { DevConfigDrawer } from "./DevConfig";
 import {
+  AUTO_LOAD_TAB,
   type DevDraft,
-  type Project,
-  useDevConfig,
-  useDevPanel,
-} from "./useDevPanel";
+  TABS,
+  type TabKey,
+  type TabState,
+} from "./draftTabs";
+import { type Project, useDevConfig, useDevPanel } from "./useDevPanel";
+
+/** What an empty lane says, per tab. */
+const EMPTY_HINT: Record<TabKey, string> = {
+  review:
+    "Nothing to review. Hit Create now after a meeting to synthesise your notes into issues.",
+  saved:
+    "Nothing set aside. Use Save for later on a draft that's real but not now.",
+  filed: "No issues filed yet.",
+  dismissed: "Nothing dismissed.",
+};
 
 /**
- * The Dev view (goal 12): a list of synthesised GitHub-issue draft cards. Each card is
+ * The Dev view (goal 12; tabbed in 12a): synthesised GitHub-issue draft cards, split
+ * across four lanes — In review, Saved for later, Filed, Dismissed. Each card is
  * editable (title/body/repo/project) and has exactly one path to a GitHub write —
- * Approve & file. Dismiss is a free local flip. A merged issue shows its provenance
- * (every entry it was synthesised from) on the muted sources line. The config
- * (PAT → repos → projects → source Docs) lives in a drawer inside the view, keeping this
- * goal independent of the settings restructure (g13).
+ * Approve & file. Save, Move to review and Dismiss are free local flips.
+ *
+ * In review is the lane meant to be worked to empty, so it drains itself by scroll; the
+ * three settled lanes are archives, so they load one page and reveal older rows only on
+ * demand. That asymmetry is the whole point: the review lane stays uncluttered however
+ * much filed/dismissed history accumulates. A merged issue shows its provenance (every
+ * entry it was synthesised from) on the muted sources line. The config (PAT → repos →
+ * projects → source Docs) lives in a drawer inside the view, keeping this goal
+ * independent of the settings restructure (g13).
  */
 export function DevView() {
   const dev = useDevPanel();
@@ -25,13 +43,9 @@ export function DevView() {
     void cfg.load();
   }, [cfg.load]);
 
-  const { pending, settled } = useMemo(() => {
-    const pending = dev.drafts.filter((d) => d.status === "draft");
-    const settled = dev.drafts.filter((d) => d.status !== "draft");
-    return { pending, settled };
-  }, [dev.drafts]);
-
   const repos = cfg.config?.repos ?? [];
+  const tab = dev.tabs[dev.activeTab];
+  const totalDrafts = Object.values(dev.counts).reduce((a, b) => a + b, 0);
 
   return (
     <main className="dev-view">
@@ -78,50 +92,127 @@ export function DevView() {
 
       {dev.error && <p className="dev-error">{dev.error}</p>}
 
+      <nav className="dev-tabs" role="tablist" aria-label="Draft lanes">
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            role="tab"
+            aria-selected={dev.activeTab === t.key}
+            className={`dev-tab${dev.activeTab === t.key ? " dev-tab--active" : ""}`}
+            onClick={() => dev.setActiveTab(t.key)}
+          >
+            {t.label}
+            <span className="dev-tab-count">{dev.counts[t.key]}</span>
+          </button>
+        ))}
+      </nav>
+
       {dev.loading ? (
         <p className="dev-empty">Loading…</p>
-      ) : !dev.configComplete && dev.drafts.length === 0 ? (
+      ) : !dev.configComplete && totalDrafts === 0 ? (
         <p className="dev-empty">
           Set up the <strong>Config</strong> (a GitHub token, at least one
           source Doc, and a target repo) — then <strong>Create now</strong> to
           draft issues from your notes.
         </p>
-      ) : dev.drafts.length === 0 ? (
-        <p className="dev-empty">
-          No drafts yet. Hit <strong>Create now</strong> after a meeting to
-          synthesise your notes into issues.
-        </p>
       ) : (
-        <div className="dev-list">
-          {pending.map((d) => (
-            <DraftCard
-              key={d.id}
-              draft={d}
-              repos={repos}
-              listProjects={cfg.listProjects}
-              onPatch={dev.patchDraft}
-              onFile={dev.fileDraft}
-              onDismiss={dev.dismissDraft}
-            />
-          ))}
-          {settled.length > 0 && (
-            <div className="dev-settled">
-              {settled.map((d) => (
-                <DraftCard
-                  key={d.id}
-                  draft={d}
-                  repos={repos}
-                  listProjects={cfg.listProjects}
-                  onPatch={dev.patchDraft}
-                  onFile={dev.fileDraft}
-                  onDismiss={dev.dismissDraft}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+        <DraftLane
+          tabKey={dev.activeTab}
+          tab={tab}
+          repos={repos}
+          listProjects={cfg.listProjects}
+          onLoadMore={dev.loadMore}
+          onPatch={dev.patchDraft}
+          onFile={dev.fileDraft}
+          onSave={dev.saveDraft}
+          onUnsave={dev.unsaveDraft}
+          onDismiss={dev.dismissDraft}
+        />
       )}
     </main>
+  );
+}
+
+/**
+ * One lane's card list. The review lane appends the next page as the user nears the
+ * bottom (an IntersectionObserver sentinel, repeating until the cursor runs out); the
+ * settled lanes stay at what they've loaded behind an explicit "Load older".
+ */
+function DraftLane({
+  tabKey,
+  tab,
+  repos,
+  listProjects,
+  onLoadMore,
+  onPatch,
+  onFile,
+  onSave,
+  onUnsave,
+  onDismiss,
+}: {
+  tabKey: TabKey;
+  tab: TabState;
+  repos: { full_name: string; description: string; is_default: boolean }[];
+  listProjects: (repo: string) => Promise<Project[]>;
+  onLoadMore: (tab: TabKey) => void;
+  onPatch: (id: number, patch: Partial<DevDraft>) => void;
+  onFile: (id: number) => void | Promise<void>;
+  onSave: (id: number) => void;
+  onUnsave: (id: number) => void;
+  onDismiss: (id: number) => void;
+}) {
+  const autoLoad = tabKey === AUTO_LOAD_TAB;
+  const sentinel = useRef<HTMLDivElement | null>(null);
+  const hasMore = tab.nextCursor !== null;
+
+  useEffect(() => {
+    if (!autoLoad || !hasMore) return;
+    const node = sentinel.current;
+    if (!node) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) onLoadMore(tabKey);
+      },
+      { rootMargin: "300px" },
+    );
+    io.observe(node);
+    return () => io.disconnect();
+  }, [autoLoad, hasMore, onLoadMore, tabKey, tab.items.length]);
+
+  if (tab.loaded && tab.items.length === 0 && !tab.loading) {
+    return <p className="dev-empty">{EMPTY_HINT[tabKey]}</p>;
+  }
+
+  return (
+    <div className="dev-list">
+      {tab.items.map((d) => (
+        <DraftCard
+          key={d.id}
+          draft={d}
+          repos={repos}
+          listProjects={listProjects}
+          onPatch={onPatch}
+          onFile={onFile}
+          onSave={onSave}
+          onUnsave={onUnsave}
+          onDismiss={onDismiss}
+        />
+      ))}
+
+      {autoLoad && hasMore && (
+        <div ref={sentinel} className="dev-scroll-sentinel" />
+      )}
+      {tab.loading && <p className="dev-lane-loading">Loading…</p>}
+      {!autoLoad && hasMore && (
+        <button
+          className="dev-load-older"
+          onClick={() => onLoadMore(tabKey)}
+          disabled={tab.loading}
+        >
+          Load older
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -142,6 +233,8 @@ function DraftCard({
   listProjects,
   onPatch,
   onFile,
+  onSave,
+  onUnsave,
   onDismiss,
 }: {
   draft: DevDraft;
@@ -149,13 +242,16 @@ function DraftCard({
   listProjects: (repo: string) => Promise<Project[]>;
   onPatch: (id: number, patch: Partial<DevDraft>) => void;
   onFile: (id: number) => void | Promise<void>;
-  onDismiss: (id: number) => void | Promise<void>;
+  onSave: (id: number) => void;
+  onUnsave: (id: number) => void;
+  onDismiss: (id: number) => void;
 }) {
   const [title, setTitle] = useState(draft.title);
   const [body, setBody] = useState(draft.body);
   const [projects, setProjects] = useState<Project[]>([]);
   const [filing, setFiling] = useState(false);
-  const editable = draft.status === "draft";
+  // A shelved card is still actionable (goal 12a) — `saved` is a shelf, not a freeze.
+  const editable = draft.status === "draft" || draft.status === "saved";
 
   useEffect(() => setTitle(draft.title), [draft.title]);
   useEffect(() => setBody(draft.body), [draft.body]);
@@ -210,7 +306,9 @@ function DraftCard({
       ? " dev-card--filed"
       : draft.status === "dismissed"
         ? " dev-card--dismissed"
-        : "";
+        : draft.status === "saved"
+          ? " dev-card--saved"
+          : "";
 
   return (
     <article className={`dev-card${statusClass}`}>
@@ -295,7 +393,7 @@ function DraftCard({
       )}
 
       <div className="dev-card-foot">
-        {draft.status === "draft" && (
+        {editable && (
           <>
             <button
               className="dev-file-btn"
@@ -304,6 +402,24 @@ function DraftCard({
             >
               {filing ? "Filing…" : "Approve & file"}
             </button>
+            {draft.status === "draft" ? (
+              <button
+                className="dev-save-btn"
+                onClick={() => onSave(draft.id)}
+                disabled={filing}
+                title="Set this aside without deciding — it moves to Saved for later"
+              >
+                Save for later
+              </button>
+            ) : (
+              <button
+                className="dev-unsave-btn"
+                onClick={() => onUnsave(draft.id)}
+                disabled={filing}
+              >
+                Move to review
+              </button>
+            )}
             <button
               className="dev-dismiss-btn"
               onClick={() => onDismiss(draft.id)}
@@ -338,7 +454,16 @@ function DraftCard({
           </>
         )}
         {draft.status === "dismissed" && (
-          <span className="dev-dismissed-tag">Dismissed</span>
+          <>
+            <span className="dev-dismissed-tag">Dismissed</span>
+            <button
+              className="dev-unsave-btn"
+              onClick={() => onUnsave(draft.id)}
+              title="Put this back in the review lane"
+            >
+              Move to review
+            </button>
+          </>
         )}
       </div>
     </article>

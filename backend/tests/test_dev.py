@@ -15,13 +15,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta
 
 import pytest
 from sqlmodel import select
 
 from app.auth.models import AllowedEmail
 from app.dev import service as dev_svc
-from app.dev.models import DRAFT, FILED, DevDocCursor, DevIssueDraft
+from app.dev.models import (
+    DISMISSED,
+    DRAFT,
+    FILED,
+    SAVED,
+    DevDocCursor,
+    DevIssueDraft,
+)
 from app.dev.schema import ProposedIssue, SourceRef, SynthesisResult
 from app.settings import notes_index
 from app.settings import service as settings_svc
@@ -321,7 +329,7 @@ def test_merged_sources_yields_one_draft_with_both(monkeypatch, session, user_a)
     tally = run(dev_svc.run_scan(session, user_a, DummyCreds()))
     assert tally["drafts_created"] == 1
 
-    drafts = dev_svc.list_drafts(session, user_a.id)
+    drafts, _ = dev_svc.list_drafts(session, user_a.id)
     assert len(drafts) == 1
     sources = json.loads(drafts[0].sources)
     assert len(sources) == 2
@@ -379,7 +387,7 @@ def test_out_of_catalog_repo_falls_back_to_default(monkeypatch, session, user_a)
     )
     _patch_synth(monkeypatch, result, [])
     run(dev_svc.run_scan(session, user_a, DummyCreds()))
-    draft = dev_svc.list_drafts(session, user_a.id)[0]
+    draft = dev_svc.list_drafts(session, user_a.id)[0][0]
     assert draft.repo == "org/kaapi-backend"  # the configured default
 
 
@@ -392,7 +400,7 @@ def test_no_action_items_yields_no_draft(monkeypatch, session, user_a):
     _patch_synth(monkeypatch, SynthesisResult(issues=[]), [])
     tally = run(dev_svc.run_scan(session, user_a, DummyCreds()))
     assert tally["drafts_created"] == 0
-    assert dev_svc.list_drafts(session, user_a.id) == []
+    assert dev_svc.list_drafts(session, user_a.id) == ([], None)
 
 
 # ── Filing ────────────────────────────────────────────────────────────────────
@@ -404,7 +412,7 @@ def _make_draft(session, user, **over) -> DevIssueDraft:
         title="Fix bug",
         body="body",
         repo=over.pop("repo", "org/kaapi-backend"),
-        status=DRAFT,
+        status=over.pop("status", DRAFT),
         sources="[]",
         project_node_id=over.pop("project_node_id", "PROJ_NODE"),
         project_title=over.pop("project_title", "Backlog"),
@@ -541,6 +549,192 @@ def test_file_without_a_token_for_owner_errors(monkeypatch, session, user_a):
     monkeypatch.setattr(dev_svc.github, "create_issue", explode)
     with pytest.raises(ApiError):
         run(dev_svc.file_draft(session, user_a.id, draft.id))
+
+
+# ── The saved shelf (goal 12a) ────────────────────────────────────────────────
+
+
+def _no_github(monkeypatch, why: str) -> None:
+    """Arm every GitHub entry point to blow up — the spy that proves a status flip is
+    purely local."""
+
+    def explode(*a, **k):
+        raise AssertionError(why)
+
+    for fn in ("create_issue", "add_issue_to_project", "list_repos", "validate_pat"):
+        monkeypatch.setattr(dev_svc.github, fn, explode)
+
+
+def test_save_makes_no_github_call(monkeypatch, session, user_a):
+    draft = _make_draft(session, user_a)
+    _no_github(monkeypatch, "no GitHub call on save")
+    out = dev_svc.save_draft(session, user_a.id, draft.id)
+    assert out.status == SAVED
+
+
+def test_save_and_unsave_are_idempotent(monkeypatch, session, user_a):
+    draft = _make_draft(session, user_a)
+    _no_github(monkeypatch, "no GitHub call on save/unsave")
+    assert dev_svc.save_draft(session, user_a.id, draft.id).status == SAVED
+    saved_again = dev_svc.save_draft(session, user_a.id, draft.id)
+    assert saved_again.status == SAVED
+    assert dev_svc.unsave_draft(session, user_a.id, draft.id).status == DRAFT
+    assert dev_svc.unsave_draft(session, user_a.id, draft.id).status == DRAFT
+
+
+def test_a_saved_draft_stays_fully_actionable(monkeypatch, session, user_a):
+    """The shelf is not a freeze: a saved card is still editable, still dismissable, and
+    still files through the unchanged `file_draft` path."""
+    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    draft = _make_draft(session, user_a)
+    dev_svc.save_draft(session, user_a.id, draft.id)
+
+    edited = dev_svc.update_draft(session, user_a.id, draft.id, title="Edited on shelf")
+    assert edited.title == "Edited on shelf"
+    assert edited.status == SAVED
+
+    async def fake_create(pat, owner, repo, title, body):
+        return {"number": 7, "url": "https://github.com/org/x/issues/7", "node_id": "N"}
+
+    async def fake_attach(pat, project_node_id, issue_node_id):
+        return "ITEM_ID"
+
+    monkeypatch.setattr(dev_svc.github, "create_issue", fake_create)
+    monkeypatch.setattr(dev_svc.github, "add_issue_to_project", fake_attach)
+    filed = run(dev_svc.file_draft(session, user_a.id, draft.id))
+    assert filed.status == FILED and filed.issue_number == 7
+
+
+def test_dismiss_reachable_from_the_saved_lane(monkeypatch, session, user_a):
+    draft = _make_draft(session, user_a, status=SAVED)
+    _no_github(monkeypatch, "no GitHub call on dismiss")
+    assert dev_svc.dismiss_draft(session, user_a.id, draft.id).status == DISMISSED
+    # …and the dismissed card can still climb back into review (the escape hatch).
+    assert dev_svc.unsave_draft(session, user_a.id, draft.id).status == DRAFT
+
+
+def test_save_unsave_endpoints_scoped_and_gated(auth, session, user_a, user_b):
+    _enable_dev(session, user_a)
+    _enable_dev(session, user_b)
+    draft = _make_draft(session, user_a)
+
+    client = auth.as_user(user_a)
+    r = client.post(f"/dev/{draft.id}/save")
+    assert r.status_code == 200 and r.json()["status"] == SAVED
+    r = client.post(f"/dev/{draft.id}/unsave")
+    assert r.status_code == 200 and r.json()["status"] == DRAFT
+
+    # A second user cannot reach the first user's draft by id.
+    other = auth.as_user(user_b)
+    assert other.post(f"/dev/{draft.id}/save").status_code == 404
+    assert other.post(f"/dev/{draft.id}/unsave").status_code == 404
+
+
+def test_save_unsave_403_without_the_dev_flag(auth, session, user_a):
+    draft = _make_draft(session, user_a)
+    client = auth.as_user(user_a)  # user_a left unflagged
+    assert client.post(f"/dev/{draft.id}/save").status_code == 403
+    assert client.post(f"/dev/{draft.id}/unsave").status_code == 403
+
+
+# ── Tabbed list + keyset pagination (goal 12a) ────────────────────────────────
+
+
+def _seed_lane(session, user, status: str, n: int, *, minute0: int = 0) -> list[int]:
+    """n drafts in one lane with strictly decreasing `updated_at` (newest first in the
+    returned id list), so page order is deterministic."""
+    ids = []
+    for i in range(n):
+        d = DevIssueDraft(
+            user_id=user.id,
+            title=f"{status}-{i}",
+            body="",
+            repo="org/kaapi-backend",
+            status=status,
+            sources="[]",
+            updated_at=datetime(2026, 8, 1, 12, 0) - timedelta(minutes=minute0 + i),
+        )
+        session.add(d)
+        session.commit()
+        session.refresh(d)
+        ids.append(d.id)
+    return ids
+
+
+def test_page_is_newest_first_and_ends_with_a_null_cursor(session, user_a):
+    ids = _seed_lane(session, user_a, FILED, 3)
+    items, next_cursor = dev_svc.list_drafts(session, user_a.id, status=FILED, limit=5)
+    assert [d.id for d in items] == ids  # newest activity first
+    assert next_cursor is None
+
+
+def test_keyset_pagination_has_no_overlap_and_no_gap(session, user_a):
+    """Follow the cursor across a >limit lane; a draft created between the two fetches
+    must not shift or duplicate a row (keyset, not offset)."""
+    ids = _seed_lane(session, user_a, FILED, 7)
+
+    page1, cursor = dev_svc.list_drafts(session, user_a.id, status=FILED, limit=5)
+    assert [d.id for d in page1] == ids[:5]
+    assert cursor is not None
+
+    # A newer row lands mid-scroll — with an offset this would push a row into page 2
+    # twice; with a keyset it simply sits above the cursor.
+    intruder = _seed_lane(session, user_a, FILED, 1, minute0=-10)[0]
+
+    page2, cursor2 = dev_svc.list_drafts(
+        session, user_a.id, status=FILED, limit=5, cursor=cursor
+    )
+    assert [d.id for d in page2] == ids[5:]  # exactly the remaining rows
+    assert cursor2 is None  # last page
+    seen = [d.id for d in page1] + [d.id for d in page2]
+    assert len(seen) == len(set(seen)) == 7  # no overlap, no gap
+    assert intruder not in seen  # the newcomer belongs above the cursor, not below it
+
+
+def test_lane_filter_and_limit_clamp(session, user_a):
+    _seed_lane(session, user_a, DRAFT, 2)
+    _seed_lane(session, user_a, SAVED, 1, minute0=10)
+    _seed_lane(session, user_a, DISMISSED, 1, minute0=20)
+    review, _ = dev_svc.list_drafts(session, user_a.id, status=DRAFT, limit=100)
+    assert len(review) == 2 and {d.status for d in review} == {DRAFT}
+    # `limit` is clamped server-side, however large the caller asks for.
+    assert len(dev_svc.list_drafts(session, user_a.id, limit=10_000)[0]) <= 50
+
+
+def test_drafts_endpoint_serves_one_tab_at_a_time(auth, session, user_a):
+    _enable_dev(session, user_a)
+    ids = _seed_lane(session, user_a, FILED, 6)
+    _seed_lane(session, user_a, DRAFT, 1, minute0=100)
+    client = auth.as_user(user_a)
+
+    r = client.get("/dev/drafts?status=filed&limit=5")
+    assert r.status_code == 200
+    body = r.json()
+    assert [d["id"] for d in body["items"]] == ids[:5]
+    assert body["next_cursor"]
+
+    r2 = client.get(f"/dev/drafts?status=filed&limit=5&cursor={body['next_cursor']}")
+    page2 = r2.json()
+    assert [d["id"] for d in page2["items"]] == ids[5:]
+    assert page2["next_cursor"] is None
+
+    # `review` maps to draft-status rows only.
+    review = client.get("/dev/drafts?status=review").json()
+    assert {d["status"] for d in review["items"]} == {DRAFT}
+    assert client.get("/dev/drafts?status=nonsense").status_code == 400
+    assert client.get("/dev/drafts?status=filed&cursor=notacursor").status_code == 400
+
+
+def test_view_meta_carries_counts_and_no_draft_array(auth, session, user_a):
+    _enable_dev(session, user_a)
+    _seed_lane(session, user_a, DRAFT, 3)
+    _seed_lane(session, user_a, SAVED, 2, minute0=10)
+    _seed_lane(session, user_a, FILED, 1, minute0=20)
+    client = auth.as_user(user_a)
+    body = client.get("/dev").json()
+    assert body["counts"] == {"review": 3, "saved": 2, "filed": 1, "dismissed": 0}
+    assert "drafts" not in body
+    assert "last_scan_at" in body and "config_complete" in body
 
 
 # ── Secrets ───────────────────────────────────────────────────────────────────

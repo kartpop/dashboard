@@ -2,7 +2,7 @@
 paths: ["backend/app/dev/**", "backend/app/routers/dev.py", "frontend/src/dev/**"]
 ---
 
-# Dev view safety (goal 12)
+# Dev view safety (goal 12; tabs + pagination in 12a)
 
 The Dev feature turns meeting-notes Docs into **de-duplicated GitHub issue drafts** the
 owner reviews and files. It adds the **fourth** runtime LLM (the issue **synthesiser**),
@@ -42,8 +42,20 @@ LLM-proposes / code-disposes ethos as the router and news.
   retries **only** the GraphQL `add_issue_to_project` step — an issue is never
   double-created. Failures raise `ApiError` (rollback-not-blind-retry); the card shows
   the error / "attach pending".
-- **Dismiss touches nothing.** A local status flip, zero GitHub calls (unit-tested with
-  a spy that raises if any GitHub function is called).
+- **Every non-filing transition touches nothing.** `dev_issue_draft.status` is
+  `draft|saved|filed|dismissed` — a **convention on a free-text column**, not a DB enum
+  (goal 12a widened it to include `saved` with **no migration**). Three of the four
+  transitions are local status flips with **zero GitHub calls** (each unit-tested with a
+  spy that raises if any GitHub function is called): **dismiss** (`→ dismissed`),
+  **save** (`draft → saved` — the "not now" that isn't "no"), and **unsave** /
+  *Move to review* (`saved|dismissed → draft`, the escape hatch). Filing remains the one
+  and only GitHub write; `saved` is a **shelf, not a terminal state**, so a shelved card
+  stays editable and files through the unchanged `file_draft` path.
+- **The draft list is paged, one lane at a time.** `GET /dev` carries view metadata +
+  per-lane counts only; `GET /dev/drafts?status=…&limit=…&cursor=…` serves one tab, newest
+  activity first, with an **opaque keyset cursor** over `(updated_at, id)` — never an
+  offset, so a draft landing mid-scroll can neither shift nor duplicate a row. `limit` is
+  clamped server-side. Every query stays `user_id`-scoped.
 
 ## The Docs read path (the app's first)
 

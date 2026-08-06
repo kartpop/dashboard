@@ -16,11 +16,14 @@ query is scoped by `user_id` (goal 8).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from sqlalchemy import and_, func, or_
 from sqlmodel import Session, select
 
 from app.dev import config, github, synth
@@ -28,6 +31,7 @@ from app.dev.models import (
     DISMISSED,
     DRAFT,
     FILED,
+    SAVED,
     DevConfig,
     DevDocCursor,
     DevIssueDraft,
@@ -511,15 +515,92 @@ async def run_scan(session: Session, user: "User", creds: "Credentials") -> dict
 
 # ── Drafts view + edits ───────────────────────────────────────────────────────
 
+# The tab a caller asks for → the underlying status value. `review` is the pending lane.
+TAB_STATUS = {
+    "review": DRAFT,
+    "saved": SAVED,
+    "filed": FILED,
+    "dismissed": DISMISSED,
+}
 
-def list_drafts(session: Session, user_id: int) -> list[DevIssueDraft]:
-    """All drafts for the user — pending (draft) first, then filed/dismissed, newest
-    first within each group."""
-    order = {DRAFT: 0, FILED: 1, DISMISSED: 2}
+DEFAULT_PAGE_LIMIT = 20
+MAX_PAGE_LIMIT = 50
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """Normalise to a tz-naive UTC datetime. Rows come back from the DB naive (the
+    column is timezone-less on both SQLite and Postgres) while freshly built values are
+    tz-aware, so keyset comparisons must be done on one consistent representation."""
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def encode_cursor(draft: DevIssueDraft) -> str:
+    """An opaque keyset token for the last row of a page — `(updated_at, id)`, NOT an
+    offset, so rows landing mid-scroll never shift or duplicate a page."""
+    raw = f"{_naive_utc(draft.updated_at).isoformat()}|{draft.id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def decode_cursor(cursor: str) -> tuple[datetime, int]:
+    try:
+        pad = "=" * (-len(cursor) % 4)
+        raw = base64.urlsafe_b64decode(cursor + pad).decode()
+        ts_str, id_str = raw.split("|", 1)
+        return datetime.fromisoformat(ts_str), int(id_str)
+    except (ValueError, TypeError, binascii.Error) as exc:
+        raise ApiError(400, "bad_cursor", "That page cursor is not valid.") from exc
+
+
+def list_drafts(
+    session: Session,
+    user_id: int,
+    *,
+    status: str | None = None,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    cursor: str | None = None,
+) -> tuple[list[DevIssueDraft], str | None]:
+    """One page of the user's drafts, newest activity first (`updated_at` desc, `id`
+    desc as a stable tiebreak).
+
+    `status` filters to a single lane (None = every lane, used by the tests and any
+    whole-list caller). Paging is **keyset**: `cursor` carries the previous page's last
+    `(updated_at, id)` and the query asks for strictly-older rows, so a draft created
+    between two page fetches neither shifts nor duplicates a row. Returns
+    `(items, next_cursor)`; `next_cursor` is None on the last page."""
+    limit = max(1, min(limit, MAX_PAGE_LIMIT))
+    query = select(DevIssueDraft).where(DevIssueDraft.user_id == user_id)
+    if status is not None:
+        query = query.where(DevIssueDraft.status == status)
+    if cursor:
+        c_ts, c_id = decode_cursor(cursor)
+        query = query.where(
+            or_(
+                DevIssueDraft.updated_at < c_ts,
+                and_(
+                    DevIssueDraft.updated_at == c_ts,
+                    DevIssueDraft.id < c_id,
+                ),
+            )
+        )
+    query = query.order_by(
+        DevIssueDraft.updated_at.desc(), DevIssueDraft.id.desc()
+    ).limit(limit + 1)  # one extra row: presence of it = there is a next page
+    rows = list(session.exec(query).all())
+    next_cursor = encode_cursor(rows[limit - 1]) if len(rows) > limit else None
+    return rows[:limit], next_cursor
+
+
+def draft_counts(session: Session, user_id: int) -> dict[str, int]:
+    """Per-tab draft counts (drives the tab badges). One grouped query, user-scoped."""
     rows = session.exec(
-        select(DevIssueDraft).where(DevIssueDraft.user_id == user_id)
+        select(DevIssueDraft.status, func.count())
+        .where(DevIssueDraft.user_id == user_id)
+        .group_by(DevIssueDraft.status)
     ).all()
-    return sorted(rows, key=lambda d: (order.get(d.status, 3), -(d.id or 0)))
+    by_status = {status: count for status, count in rows}
+    return {tab: by_status.get(value, 0) for tab, value in TAB_STATUS.items()}
 
 
 def _owned_draft(session: Session, user_id: int, draft_id: int) -> DevIssueDraft:
@@ -541,9 +622,11 @@ def update_draft(
     project_title: str | None = None,
 ) -> DevIssueDraft:
     """Persist an inline edit (title/body/repo/project). A filed draft is frozen — its
-    text already lives on GitHub, so edits only apply while status is `draft`."""
+    text already lives on GitHub — and a dismissed one is declined, so edits apply only
+    while the draft is still actionable: `draft` (in review) or `saved` (shelved, goal
+    12a — a shelf is not a freeze)."""
     draft = _owned_draft(session, user_id, draft_id)
-    if draft.status != DRAFT:
+    if draft.status not in (DRAFT, SAVED):
         raise ApiError(409, "draft_not_editable", "Only a pending draft can be edited.")
     if title is not None:
         draft.title = title.strip()
@@ -562,11 +645,44 @@ def update_draft(
 
 
 def dismiss_draft(session: Session, user_id: int, draft_id: int) -> DevIssueDraft:
-    """Decline a draft — a local status flip, zero GitHub calls."""
+    """Decline a draft — a local status flip, zero GitHub calls. Reachable from the
+    review lane and the saved shelf alike."""
     draft = _owned_draft(session, user_id, draft_id)
     if draft.status == FILED:
         raise ApiError(409, "already_filed", "A filed draft cannot be dismissed.")
-    draft.status = DISMISSED
+    return _flip_status(session, draft, DISMISSED)
+
+
+def save_draft(session: Session, user_id: int, draft_id: int) -> DevIssueDraft:
+    """Set a draft aside for later (goal 12a) — the "not now" that isn't "no". A local
+    status flip, zero GitHub calls, idempotent (re-saving a saved draft is a no-op).
+    The card stays fully actionable from the saved shelf."""
+    draft = _owned_draft(session, user_id, draft_id)
+    if draft.status == FILED:
+        raise ApiError(409, "already_filed", "A filed draft cannot be saved for later.")
+    if draft.status == DISMISSED:
+        raise ApiError(
+            409, "draft_dismissed", "Move the draft back to review before saving it."
+        )
+    return _flip_status(session, draft, SAVED)
+
+
+def unsave_draft(session: Session, user_id: int, draft_id: int) -> DevIssueDraft:
+    """Move a card back to the review lane — the escape hatch out of the saved shelf
+    (and out of the dismissed lane, so a mis-click is recoverable). A local status flip,
+    zero GitHub calls, idempotent. A filed draft has no way back: the issue exists."""
+    draft = _owned_draft(session, user_id, draft_id)
+    if draft.status == FILED:
+        raise ApiError(409, "already_filed", "A filed draft cannot return to review.")
+    return _flip_status(session, draft, DRAFT)
+
+
+def _flip_status(session: Session, draft: DevIssueDraft, status: str) -> DevIssueDraft:
+    """Persist a local status change. Idempotent: a flip to the status a draft already
+    holds leaves `updated_at` (and so the card's position in its lane) alone."""
+    if draft.status == status:
+        return draft
+    draft.status = status
     draft.updated_at = _now()
     session.add(draft)
     session.commit()

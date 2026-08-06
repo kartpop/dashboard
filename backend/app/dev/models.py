@@ -20,7 +20,7 @@ Four per-user tables backing the meeting-notes → issue-draft pipeline:
   that minute already consumed). No marker is ever written into the Doc — the cursor is
   invisible, undeletable, and equally token-frugal.
 - `dev_issue_draft` — one proposed issue: title/body/repo (LLM-proposed, human-edited),
-  status draft|filed|dismissed, the multi-source provenance (which entries it was
+  status draft|saved|filed|dismissed, the multi-source provenance (which entries it was
   synthesised from), the chosen project, and — once filed — the GitHub issue url/number.
 
 Row-scoping (goal 8): every table carries `user_id`; every query filters by it.
@@ -35,8 +35,15 @@ from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 # ── dev_issue_draft.status ────────────────────────────────────────────────────
+# The value set is a **convention on a free-text column** (`max_length=20`), not a DB
+# enum — widening it (goal 12a added `saved`) needs no migration.
+#
 # Proposed by the LLM, awaiting the owner's review. The default resting state.
 DRAFT = "draft"
+# Set aside for later (goal 12a): a "not now" that isn't "no". A shelf, not a terminal
+# state — a saved draft is still fully editable and still offers Approve & file /
+# Dismiss / Move back to review. Local status flip only — zero GitHub calls.
+SAVED = "saved"
 # Approved + created on GitHub (issue_url/issue_number set). Terminal for the happy
 # path; a project-attach that failed leaves `project_attached` False for retry.
 FILED = "filed"

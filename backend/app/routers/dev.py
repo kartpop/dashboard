@@ -1,13 +1,16 @@
-"""Dev-view HTTP surface (goal 12).
+"""Dev-view HTTP surface (goal 12; tabs + pagination in 12a).
 
-The issue-draft list, inline edits, approve-and-file, dismiss, a manual scan-now, and
-the in-view config (PAT + repos + projects + source Docs). Every endpoint is gated by
-`require_dev_enabled` (403 for non-enabled users, so the whole resource is invisible to
-them) and scoped to `current_user`. Only `scan-now` takes Google creds (the Docs read);
-the filing path takes none (it uses the stored PAT).
+View metadata (`GET /dev`: last scan, config completeness, per-tab counts), one paged
+tab of drafts at a time (`GET /dev/drafts`), inline edits, approve-and-file, the three
+local status flips (dismiss / save / unsave), a manual scan-now, and the in-view config
+(PAT + repos + projects + source Docs). Every endpoint is gated by `require_dev_enabled`
+(403 for non-enabled users, so the whole resource is invisible to them) and scoped to
+`current_user`. Only `scan-now` takes Google creds (the Docs read); the filing path takes
+none (it uses the stored PAT).
 
 LLM-proposes / code-disposes: nothing here lets the model touch GitHub — a GitHub write
-happens only on the explicit `/{id}/file` approve, through `service.file_draft`.
+happens only on the explicit `/{id}/file` approve, through `service.file_draft`. Save,
+unsave and dismiss are local status flips and make no GitHub call at all.
 """
 
 from __future__ import annotations
@@ -86,19 +89,50 @@ def _tree_out(node: dict) -> dict:
 
 
 @router.get("")
-async def get_drafts(
+async def get_view_meta(
     user: User = Depends(require_dev_enabled),
     session: Session = Depends(get_session),
 ):
-    """The issue-draft list (pending first, then filed/dismissed) + the last-scan time
-    and whether config is complete (drives the empty-state hint)."""
+    """Dev-view metadata only (goal 12a): the last-scan time, whether config is complete
+    (drives the empty-state hint), and the per-tab draft counts that feed the tab badges.
+    The drafts themselves come one page at a time from `/dev/drafts` — this endpoint no
+    longer carries the (unbounded) draft array."""
     cfg = dev_svc.get_or_create_config(session, user.id)
-    drafts = dev_svc.list_drafts(session, user.id)
     return {
-        "drafts": [_draft_out(d) for d in drafts],
         "last_scan_at": cfg.last_scan_at.isoformat() if cfg.last_scan_at else None,
         "config_complete": dev_svc.is_config_complete(session, cfg),
+        "counts": dev_svc.draft_counts(session, user.id),
     }
+
+
+@router.get("/drafts")
+async def get_drafts(
+    status: str = "review",
+    limit: int = dev_svc.DEFAULT_PAGE_LIMIT,
+    cursor: Optional[str] = None,
+    user: User = Depends(require_dev_enabled),
+    session: Session = Depends(get_session),
+):
+    """One tab's page of drafts, newest activity first (goal 12a).
+
+    `status` is a tab name (`review|saved|filed|dismissed`; `review` = pending drafts).
+    `next_cursor` is an opaque keyset token over `(updated_at, id)` — follow it for the
+    next page. `limit` is clamped server-side, so the payload stays bounded however the
+    settled lanes pile up."""
+    if status not in dev_svc.TAB_STATUS:
+        raise ApiError(
+            400,
+            "bad_status",
+            f"status must be one of {', '.join(dev_svc.TAB_STATUS)}.",
+        )
+    items, next_cursor = dev_svc.list_drafts(
+        session,
+        user.id,
+        status=dev_svc.TAB_STATUS[status],
+        limit=limit,
+        cursor=cursor,
+    )
+    return {"items": [_draft_out(d) for d in items], "next_cursor": next_cursor}
 
 
 @router.post("/scan-now")
@@ -169,6 +203,30 @@ async def dismiss_draft(
 ):
     """Decline a draft — a local status flip, zero GitHub calls."""
     draft = dev_svc.dismiss_draft(session, user.id, draft_id)
+    return _draft_out(draft)
+
+
+@router.post("/{draft_id}/save")
+async def save_draft(
+    draft_id: int,
+    user: User = Depends(require_dev_enabled),
+    session: Session = Depends(get_session),
+):
+    """Save for later (goal 12a) — shelve a real-but-not-now draft. Like dismiss, a
+    local status flip with zero GitHub calls; filing stays the only GitHub write."""
+    draft = dev_svc.save_draft(session, user.id, draft_id)
+    return _draft_out(draft)
+
+
+@router.post("/{draft_id}/unsave")
+async def unsave_draft(
+    draft_id: int,
+    user: User = Depends(require_dev_enabled),
+    session: Session = Depends(get_session),
+):
+    """Move back to review — the escape hatch out of the saved shelf (and out of the
+    dismissed lane). A local status flip, zero GitHub calls."""
+    draft = dev_svc.unsave_draft(session, user.id, draft_id)
     return _draft_out(draft)
 
 
