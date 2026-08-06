@@ -270,6 +270,63 @@ lists only. They assert *state-machine* properties, not just final state:
   a tall group. Menu clipping is a *visual* property → confirm by screenshot / manual review, not
   only by request count.
 
+### Dev view (goal 12; tabs + pagination in 12a)
+
+Every `/dev/*` endpoint is behind the per-user **`dev` feature flag** (403 without it) and a
+session cookie, so drive these as a flagged user. **Never file** against a real repo during
+verification — `POST /dev/{id}/file` is a live GitHub write. Save/unsave/dismiss are local
+flips and safe to exercise.
+
+```bash
+# View metadata ONLY (goal 12a): no draft array, plus the four tab counts.
+curl -s http://localhost:8010/dev | jq .
+# → {"last_scan_at": ..., "config_complete": true, "counts": {"review":N,"saved":N,"filed":N,"dismissed":N}}
+
+# One lane at a time, newest activity first. status ∈ review|saved|filed|dismissed.
+curl -s 'http://localhost:8010/dev/drafts?status=review&limit=5' | jq '.items | length, .next_cursor'
+# Follow the opaque keyset cursor for the next page — no overlap, no gap, no drift.
+curl -s 'http://localhost:8010/dev/drafts?status=filed&limit=5&cursor=<NEXT_CURSOR>' | jq '.items[].id'
+# Bad inputs → 400 envelopes: status=nonsense (bad_status), cursor=garbage (bad_cursor).
+
+# Local status flips — zero GitHub calls, idempotent, return the updated draft.
+curl -s -X POST http://localhost:8010/dev/<ID>/save   | jq .status   # → "saved"
+curl -s -X POST http://localhost:8010/dev/<ID>/unsave | jq .status   # → "draft"
+curl -s -X POST http://localhost:8010/dev/<ID>/dismiss | jq .status  # → "dismissed"
+```
+
+Frontend selectors:
+- `.dev-tabs` / `.dev-tab` (`role="tab"`, `.dev-tab--active` on the current lane) — the four
+  lanes **In review · Saved for later · Filed · Dismissed**; `.dev-tab-count` is the badge.
+- `.dev-list` / `.dev-card` — the active lane's cards only (one lane is mounted at a time).
+  `.dev-card--saved` (tinted) / `.dev-card--filed` / `.dev-card--dismissed`.
+- `.dev-save-btn` ("Save for later", review lane) / `.dev-unsave-btn` ("Move to review", saved
+  and dismissed lanes) / `.dev-dismiss-btn` / `.dev-file-btn` / `.dev-retry-btn`.
+- `.dev-scroll-sentinel` — the review lane's infinite-scroll trip wire (present only while its
+  cursor is non-null); `.dev-load-older` — the settled lanes' explicit pager.
+
+UI-flow checks (Playwright + the `mutations` request listener above):
+- **Save for later moves the card and shifts two badges.** Click `.dev-save-btn` on a review
+  card → exactly one `POST /dev/{id}/save`, **no GitHub-bound request**, the card leaves
+  `.dev-list` immediately (no reload / no `GET /dev/drafts`), In-review's `.dev-tab-count`
+  drops by one and Saved-for-later's rises by one.
+- **The saved lane is actionable.** On the Saved tab, a card shows `.dev-file-btn`,
+  `.dev-unsave-btn` and `.dev-dismiss-btn`, and its title input is editable (blur → one
+  `PATCH /dev/{id}`).
+- **In review drains by scroll.** With a backlog > 20, the first page paints immediately, then
+  scrolling to the bottom appends pages (`GET /dev/drafts?status=review&cursor=…`, one per
+  page) until `next_cursor` is null and `.dev-scroll-sentinel` disappears — ending with every
+  pending draft in the DOM.
+- **Settled lanes stay bounded.** Activating Filed/Dismissed fires exactly **one**
+  `GET /dev/drafts` and renders ≤ 20 cards; scrolling to the bottom fires **none** — older rows
+  appear only after clicking `.dev-load-older`.
+- **Switching tabs reconciles the badges** — each `.dev-tab` click re-reads `GET /dev`.
+- **Create now reports what it did.** After `.dev-scan-btn`, `.dev-scan-tally`
+  (`role="status"`) states `N docs read · M new entries · K drafts`. The zero-draft wording
+  is the point: entries that were read but restate already-filed work say "no new drafts —
+  that work is already drafted or filed", a failed/truncated LLM call says "synthesis
+  failed … re-scanned", and neither reads as an unread source Doc. `POST /dev/scan-now`
+  returns that tally as `{"tally": {docs_read, new_entries, drafts_created, synthesis_failed}}`.
+
 ## What to capture
 
 - API responses: paste the JSON body inline in the report.

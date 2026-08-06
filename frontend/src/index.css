@@ -2516,6 +2516,17 @@ h1, h2, h3 {
   font-size: 13px;
 }
 
+/* The last scan's tally — what "Create now" actually did, in one muted line. */
+.dev-scan-tally {
+  margin: 0 0 12px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted-bg);
+  color: var(--done);
+  font-size: 12px;
+}
+
 .dev-empty {
   color: var(--done);
   padding: 32px 0;
@@ -2528,13 +2539,79 @@ h1, h2, h3 {
   gap: 12px;
 }
 
-.dev-settled {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px dashed var(--border);
+/* Tab bar (goal 12a) — four lanes, each with a count badge. */
+.dev-tabs {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+
+.dev-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--done);
+  padding: 8px 12px;
+  margin-bottom: -1px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dev-tab:hover {
+  color: var(--text);
+}
+
+.dev-tab--active {
+  color: var(--text-h);
+  font-weight: 600;
+  border-bottom-color: var(--text-h);
+}
+
+.dev-tab-count {
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--muted-bg);
+  color: var(--done);
+}
+
+.dev-tab--active .dev-tab-count {
+  color: var(--text-h);
+}
+
+.dev-lane-loading {
+  color: var(--done);
+  font-size: 12px;
+  text-align: center;
+  padding: 8px 0;
+}
+
+/* The review lane's infinite-scroll trip wire (zero-height, never visible). */
+.dev-scroll-sentinel {
+  height: 1px;
+}
+
+.dev-load-older {
+  align-self: center;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--done);
+  border-radius: 8px;
+  padding: 5px 14px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dev-load-older:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .dev-card {
@@ -2551,6 +2628,12 @@ h1, h2, h3 {
 
 .dev-card--dismissed {
   opacity: 0.55;
+}
+
+/* Shelved (goal 12a) — set aside, but still a live card, so it is tinted not dimmed. */
+.dev-card--saved {
+  border-color: color-mix(in srgb, #f59e0b 40%, var(--border));
+  background: color-mix(in srgb, #f59e0b 5%, var(--bg));
 }
 
 .dev-card-title {
@@ -2654,6 +2737,8 @@ h1, h2, h3 {
 }
 
 .dev-dismiss-btn,
+.dev-save-btn,
+.dev-unsave-btn,
 .dev-retry-btn {
   border: 1px solid var(--border);
   background: var(--bg);
@@ -2666,6 +2751,8 @@ h1, h2, h3 {
 
 .dev-file-btn:disabled,
 .dev-dismiss-btn:disabled,
+.dev-save-btn:disabled,
+.dev-unsave-btn:disabled,
 .dev-retry-btn:disabled {
   opacity: 0.6;
   cursor: default;
