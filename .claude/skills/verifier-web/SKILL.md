@@ -320,6 +320,12 @@ UI-flow checks (Playwright + the `mutations` request listener above):
   `GET /dev/drafts` and renders ≤ 20 cards; scrolling to the bottom fires **none** — older rows
   appear only after clicking `.dev-load-older`.
 - **Switching tabs reconciles the badges** — each `.dev-tab` click re-reads `GET /dev`.
+- **Create now reports what it did.** After `.dev-scan-btn`, `.dev-scan-tally`
+  (`role="status"`) states `N docs read · M new entries · K drafts`. The zero-draft wording
+  is the point: entries that were read but restate already-filed work say "no new drafts —
+  that work is already drafted or filed", a failed/truncated LLM call says "synthesis
+  failed … re-scanned", and neither reads as an unread source Doc. `POST /dev/scan-now`
+  returns that tally as `{"tally": {docs_read, new_entries, drafts_created, synthesis_failed}}`.
 
 ## What to capture
 

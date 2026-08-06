@@ -510,6 +510,10 @@ async def run_scan(session: Session, user: "User", creds: "Credentials") -> dict
         "docs_read": docs_read,
         "new_entries": len(batch),
         "drafts_created": stored,
+        # Distinguishes "the model found nothing new to draft" from "the call failed and
+        # the batch is still queued" — both leave drafts_created at 0, but only one of
+        # them means the entries were actually considered. The UI says which.
+        "synthesis_failed": synth_failed,
     }
 
 

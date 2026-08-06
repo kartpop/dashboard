@@ -8,6 +8,7 @@ import {
   type TabKey,
   type TabState,
 } from "./draftTabs";
+import { formatScanTally } from "./scanTally";
 import { type Project, useDevConfig, useDevPanel } from "./useDevPanel";
 
 /** What an empty lane says, per tab. */
@@ -91,6 +92,15 @@ export function DevView() {
       )}
 
       {dev.error && <p className="dev-error">{dev.error}</p>}
+
+      {/* What the scan you just ran actually did. A scan that reads a Doc and draws no
+          draft from it (the work is already filed) looks exactly like a Doc that was
+          never read — unless the counts say otherwise. */}
+      {dev.lastTally && (
+        <p className="dev-scan-tally" role="status">
+          {formatScanTally(dev.lastTally)}
+        </p>
+      )}
 
       <nav className="dev-tabs" role="tablist" aria-label="Draft lanes">
         {TABS.map((t) => (

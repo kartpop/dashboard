@@ -16,6 +16,7 @@ import {
   setLoading as setTabLoading,
   tabForStatus,
 } from "./draftTabs";
+import type { ScanTally } from "./scanTally";
 
 export type { DevDraft, DraftSource, TabKey } from "./draftTabs";
 
@@ -48,6 +49,9 @@ export function useDevPanel() {
   const [configComplete, setConfigComplete] = useState(false);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
+  // What the last scan in THIS session did. Session-only by design: it answers "what did
+  // that click just do?", so it is meaningless after a reload (unlike `lastScanAt`).
+  const [lastTally, setLastTally] = useState<ScanTally | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The cursor a fetch is already in flight for, per lane — guards the review lane's
   // scroll sentinel from firing the same page twice.
@@ -132,8 +136,15 @@ export function useDevPanel() {
 
   const scanNow = useCallback(async () => {
     setScanning(true);
+    setLastTally(null);
     try {
-      await apiPost("/dev/scan-now", {});
+      // Keep the tally: "2 docs · 2 new entries · 0 drafts" is the only thing that tells
+      // a suppressed-as-already-filed entry apart from a source Doc that never got read.
+      const { tally } = await apiPost<{ tally: ScanTally }>(
+        "/dev/scan-now",
+        {},
+      );
+      setLastTally(tally);
       // New drafts land at the top of the review lane — re-read it from page one.
       await Promise.all([loadMeta(), loadPage("review", null, true)]);
     } catch (e) {
@@ -220,6 +231,7 @@ export function useDevPanel() {
     setActiveTab,
     counts,
     lastScanAt,
+    lastTally,
     configComplete,
     loading,
     scanning,

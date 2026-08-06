@@ -213,6 +213,9 @@ def test_synth_failure_leaves_cursor_unadvanced_for_retry(monkeypatch, session, 
     t1 = run(dev_svc.run_scan(session, user_a, DummyCreds()))
     assert t1["new_entries"] == 2
     assert len(calls) == 1
+    # The tally distinguishes a failure from "the model found nothing worth drafting":
+    # both leave drafts_created at 0, but only one means the batch is still queued.
+    assert t1["drafts_created"] == 0 and t1["synthesis_failed"] is True
 
     # Cursor was NOT advanced — the same two entries are presented to the LLM again.
     t2 = run(dev_svc.run_scan(session, user_a, DummyCreds()))
@@ -400,6 +403,11 @@ def test_no_action_items_yields_no_draft(monkeypatch, session, user_a):
     _patch_synth(monkeypatch, SynthesisResult(issues=[]), [])
     tally = run(dev_svc.run_scan(session, user_a, DummyCreds()))
     assert tally["drafts_created"] == 0
+    # An entry WAS read and considered — the model just drew nothing from it. The tally
+    # says so, so this can't be mistaken for a source Doc that never got read.
+    assert tally["docs_read"] == 1
+    assert tally["new_entries"] == 1
+    assert tally["synthesis_failed"] is False
     assert dev_svc.list_drafts(session, user_a.id) == ([], None)
 
 

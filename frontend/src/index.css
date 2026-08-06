@@ -2516,6 +2516,17 @@ h1, h2, h3 {
   font-size: 13px;
 }
 
+/* The last scan's tally — what "Create now" actually did, in one muted line. */
+.dev-scan-tally {
+  margin: 0 0 12px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted-bg);
+  color: var(--done);
+  font-size: 12px;
+}
+
 .dev-empty {
   color: var(--done);
   padding: 32px 0;
