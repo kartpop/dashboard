@@ -10,9 +10,15 @@
 
 import type { DevDraft, RelatedMatch } from "./draftTabs";
 
-/** The anchor text for one match: `#12 Login is broken` / `PR #45 (merged) Fix login`. */
-export function matchLabel(m: RelatedMatch): string {
-  const ref = m.type === "pr" ? `PR #${m.number} (${m.state})` : `#${m.number}`;
+/**
+ * The anchor text for one match: `#12 Login is broken` / `PR #45 (merged) Fix login`.
+ * A match living outside the draft's own repo (12b.1: matching is catalog-wide) is
+ * prefixed with its repo — `org/backend#12 …` — so a cross-repo hit reads as one.
+ */
+export function matchLabel(m: RelatedMatch, draftRepo: string): string {
+  const sameRepo = !m.repo || m.repo === draftRepo;
+  const num = sameRepo ? `#${m.number}` : `${m.repo}#${m.number}`;
+  const ref = m.type === "pr" ? `PR ${num} (${m.state})` : num;
   return m.title ? `${ref} ${m.title}` : ref;
 }
 
@@ -27,8 +33,15 @@ export function visibleMatches(draft: DevDraft): RelatedMatch[] {
   if (draft.kind !== "comment" || draft.target_issue_number === null) {
     return matches;
   }
+  // After conversion the draft's repo IS the target's repo, so a same-numbered issue
+  // in another repo is a genuine secondary match, not the target.
   return matches.filter(
-    (m) => !(m.type === "issue" && m.number === draft.target_issue_number),
+    (m) =>
+      !(
+        m.type === "issue" &&
+        m.number === draft.target_issue_number &&
+        (!m.repo || m.repo === draft.repo)
+      ),
   );
 }
 

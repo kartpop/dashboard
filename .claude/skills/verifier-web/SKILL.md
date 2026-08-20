@@ -332,10 +332,11 @@ UI-flow checks (Playwright + the `mutations` request listener above):
 
 `GET /dev/drafts` items now carry `kind` (`issue|comment`), `target_issue_number` /
 `target_issue_url`, and `related_issues` (null = not yet matched; `[]` = matched, nothing
-similar; else `[{number, type: issue|pr, state, url, title, confidence, reason,
-nothing_new?}]` — urls/titles provably from the fetched candidate list). Filing a comment
-draft is a **live GitHub write** (one comment on a real issue) — never file during
-verification.
+similar; else `[{repo, number, type: issue|pr, state, url, title, confidence, reason,
+nothing_new?}]` — repo/urls/titles provably from the fetched candidate list). Matching is
+**catalog-wide (12b.1)**: a match may live in a different repo than the draft's tag, and
+the Similar line then reads `owner/repo#N …`. Filing a comment draft is a **live GitHub
+write** (one comment on a real issue) — never file during verification.
 
 ```bash
 # The @-mention member list — dev-flag-gated, per-owner token routing; a PAT that can't
@@ -361,9 +362,10 @@ UI-flow checks:
 - **Comment cards hide the dropdowns.** A `kind=comment` card shows `.dev-comment-target`
   and NO `.dev-card-controls` (no repo select, no project select); its body textarea is
   still editable (blur → one `PATCH /dev/{id}`).
-- **Repo change clears matches.** On an issue card, switching the repo select fires one
-  `PATCH /dev/{id}` and `.dev-card-similar` disappears (matches stale → cleared; they
-  return only on a future scan).
+- **Repo change keeps matches (12b.1).** On an issue card, switching the repo select
+  fires one `PATCH /dev/{id}` and `.dev-card-similar` STAYS (matches are catalog-wide,
+  so re-targeting doesn't invalidate them); entries that now sit in another repo render
+  with the `owner/repo#N` prefix. Only the project select clears.
 - **Typing `@` opens the typeahead.** Focus a card body, type `@` → one
   `GET /dev/config/members?repo=…` (then cached per repo — a second `@` fires none),
   `.dev-mention-menu` lists logins; picking one inserts plain `@login ` text at the caret

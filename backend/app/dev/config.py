@@ -30,14 +30,19 @@ DO_NOT_REDRAFT_LIMIT = int(os.environ.get("DEV_DO_NOT_REDRAFT_LIMIT", "60"))
 
 # ── Live-GitHub dedup (goal 12b): the matcher + comment drafter ────────────────
 
-# The issue matcher — one call per repo with unmatched drafts, wide-but-cheap input
+# The issue matcher — per repo with unmatched drafts, wide-but-cheap input
 # (candidate titles, not bodies). Sonnet by default: this is per-pair judgment, not
 # cross-conversation synthesis, and the candidate lists are large.
 DEV_MATCH_MODEL = os.environ.get("DEV_MATCH_MODEL", "claude-sonnet-5")
 # Output budget for the matcher. It streams (the g12 `5c6b48e` truncation lesson), so
-# this is only a ceiling — the first post-deploy scan matches the whole lingering
-# backlog in one pass and must not truncate mid-JSON.
+# this is only a ceiling; a truncated call is treated as a failure and retried next
+# scan rather than half-parsed.
 DEV_MATCH_MAX_TOKENS = int(os.environ.get("DEV_MATCH_MAX_TOKENS", "16000"))
+# Drafts per matcher call. A repo's unmatched drafts are chunked code-side (candidates
+# repeated per chunk, matches merged) so no single call's OUTPUT can outgrow the budget
+# — the first prod backlog run (78 drafts in one call) truncated at 16k and matched
+# nothing. ~20 drafts of matches is a few thousand tokens: comfortable headroom.
+DEV_MATCH_DRAFT_CHUNK = int(os.environ.get("DEV_MATCH_DRAFT_CHUNK", "20"))
 
 # The comment drafter reuses DEV_MODEL (this text faces humans on GitHub) with its own
 # output budget — one call per converted draft, narrow-but-deep input (one issue's

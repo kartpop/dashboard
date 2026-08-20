@@ -1149,12 +1149,24 @@ _PR_CANDS = [
 ]
 
 
-def _patch_candidates(monkeypatch, issues=_ISSUE_CANDS, prs=_PR_CANDS):
-    async def fake_issues(pat, owner, repo):
-        return issues
+def _seed_matching(session, user) -> None:
+    """Token + repo catalog — the match phase fetches candidates for every catalog
+    repo (12b.1), so direct `_match_and_convert` tests need one configured."""
+    dev_svc.add_token(session, user.id, "github_pat_X", ["org"], "octocat")
+    dev_svc.set_repos(session, user.id, _REPOS)
 
-    async def fake_prs(pat, owner, repo):
-        return prs
+
+def _patch_candidates(
+    monkeypatch, issues=_ISSUE_CANDS, prs=_PR_CANDS, repo="org/kaapi-backend"
+):
+    """Stub the candidate fetches: only `repo` has issues/PRs, every other catalog
+    repo comes back empty (mirrors the owner's real setup)."""
+
+    async def fake_issues(pat, owner, name):
+        return issues if f"{owner}/{name}" == repo else []
+
+    async def fake_prs(pat, owner, name):
+        return prs if f"{owner}/{name}" == repo else []
 
     monkeypatch.setattr(dev_svc.github, "list_open_issues", fake_issues)
     monkeypatch.setattr(dev_svc.github, "list_recent_prs", fake_prs)
@@ -1170,16 +1182,21 @@ def _patch_matcher(monkeypatch, result, calls=None):
 
 
 def _matches(*pairs) -> MatchResult:
-    """(draft_index, [(number, type, confidence), …]) tuples → a MatchResult."""
+    """(draft_index, [(number, type, confidence[, repo]), …]) → a MatchResult. The
+    repo defaults to the candidate-bearing test repo."""
     return MatchResult(
         drafts=[
             DraftMatches(
                 draft_index=idx,
                 matches=[
                     ProposedMatch(
-                        number=n, type=t, confidence=c, reason="looks the same"
+                        repo=m[3] if len(m) > 3 else "org/kaapi-backend",
+                        number=m[0],
+                        type=m[1],
+                        confidence=m[2],
+                        reason="looks the same",
                     )
-                    for n, t, c in ms
+                    for m in ms
                 ],
             )
             for idx, ms in pairs
@@ -1193,10 +1210,11 @@ def test_match_dispose_drops_out_of_set_and_takes_urls_from_the_fetch(
     """Every LLM-returned (number, type) outside the fetched candidate set is dropped,
     and the stored url/title/type/state come from the code-fetched list — never from
     the model. The `Related:` body line is built code-side from validated matches."""
-    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    _seed_matching(session, user_a)
     draft = _make_draft(session, user_a, project_node_id=None, project_title=None)
     _patch_candidates(monkeypatch)
-    # A bogus number (999) and a mistyped pair (45 as issue) — both must be dropped.
+    # A bogus number (999), a mistyped pair (45 as issue) and a right-number/wrong-repo
+    # pair (12 claimed in kaapi-web, which has no candidates) — all must be dropped.
     _patch_matcher(
         monkeypatch,
         _matches(
@@ -1207,6 +1225,7 @@ def test_match_dispose_drops_out_of_set_and_takes_urls_from_the_fetch(
                     (45, "pr", "medium"),
                     (999, "issue", "high"),
                     (45, "issue", "high"),
+                    (12, "issue", "high", "org/kaapi-web"),
                 ],
             )
         ),
@@ -1220,6 +1239,7 @@ def test_match_dispose_drops_out_of_set_and_takes_urls_from_the_fetch(
     assert [(m["number"], m["type"]) for m in stored] == [(12, "issue"), (45, "pr")]
     assert stored[0]["url"] == _ISSUE_CANDS[0]["html_url"]  # provably from the fetch
     assert stored[0]["title"] == "Login is broken" and stored[0]["state"] == "open"
+    assert stored[0]["repo"] == "org/kaapi-backend"  # from the fetch, not the model
     assert (
         stored[1]["url"] == _PR_CANDS[0]["html_url"] and stored[1]["state"] == "merged"
     )
@@ -1234,7 +1254,7 @@ def test_high_issue_match_with_new_info_converts_to_comment_draft(
     for the ONE high-matched PR, drafter says has_new_info → kind=comment with target
     set from the validated match, body replaced, project cleared — and the draft stays
     in its lane (never auto-dismissed, never auto-filed)."""
-    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    _seed_matching(session, user_a)
     draft = _make_draft(session, user_a)  # carries a project preselect
     _patch_candidates(monkeypatch)
     _patch_matcher(
@@ -1295,7 +1315,7 @@ def test_high_issue_match_with_new_info_converts_to_comment_draft(
 def test_pr_only_high_match_stays_a_linked_issue_draft(monkeypatch, session, user_a):
     """PRs are never comment targets: a draft whose only high match is a PR keeps
     kind=issue and no thread fetch or drafter call ever happens."""
-    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    _seed_matching(session, user_a)
     draft = _make_draft(session, user_a)
     _patch_candidates(monkeypatch, issues=[])
     _patch_matcher(monkeypatch, _matches((0, [(45, "pr", "high")])))
@@ -1316,7 +1336,7 @@ def test_pr_only_high_match_stays_a_linked_issue_draft(monkeypatch, session, use
 def test_nothing_new_flags_the_match_and_never_auto_dismisses(
     monkeypatch, session, user_a
 ):
-    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    _seed_matching(session, user_a)
     draft = _make_draft(session, user_a)
     _patch_candidates(monkeypatch, prs=[])
     _patch_matcher(monkeypatch, _matches((0, [(12, "issue", "high")])))
@@ -1354,7 +1374,7 @@ def test_matcher_scope_whole_unsettled_backlog_once_per_draft(
 ):
     """The matcher targets every non-settled draft (review + saved) whose
     related_issues is NULL — filed/dismissed never, already-matched never again."""
-    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    _seed_matching(session, user_a)
     in_review = _make_draft(session, user_a, status=DRAFT)
     shelved = _make_draft(session, user_a, status=SAVED)
     _make_draft(session, user_a, status=FILED)
@@ -1438,11 +1458,16 @@ def test_scan_tally_reports_linked_and_converted(monkeypatch, session, user_a):
 # ── Goal 12b: repo change + comment re-target guard ───────────────────────────
 
 
-def test_repo_change_clears_stale_matches(session, user_a):
-    draft = _make_draft(session, user_a, related_issues='[{"number": 12}]')
+def test_repo_change_keeps_catalog_wide_matches(session, user_a):
+    """12b.1: matches are judged against the WHOLE catalog, so correcting a
+    synthesiser mis-tag must not throw them away (re-matching would also never fire —
+    the NULL-guard is once per draft)."""
+    stored = '[{"repo": "org/kaapi-backend", "number": 12}]'
+    draft = _make_draft(session, user_a, related_issues=stored)
     out = dev_svc.update_draft(session, user_a.id, draft.id, repo="org/kaapi-web")
-    assert out.related_issues is None  # stale — re-matched on the next scan
-    # A body-only edit leaves the matches alone.
+    assert out.repo == "org/kaapi-web"
+    assert out.related_issues == stored  # still valid — catalog-wide
+    # A body-only edit leaves the matches alone too.
     draft2 = _make_draft(session, user_a, related_issues="[]")
     out2 = dev_svc.update_draft(session, user_a.id, draft2.id, body="edited")
     assert out2.related_issues == "[]"
@@ -1487,7 +1512,7 @@ def _make_comment_draft(session, user, **over) -> DevIssueDraft:
 def test_filing_a_comment_draft_posts_exactly_one_comment(monkeypatch, session, user_a):
     """kind=comment files as ONE comments-endpoint call — zero create_issue, zero
     project attach — and stores the comment URL against the existing columns."""
-    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    _seed_matching(session, user_a)
     draft = _make_comment_draft(session, user_a)
 
     def explode(*a, **k):
@@ -1522,7 +1547,7 @@ def test_comment_filing_failure_leaves_the_draft_for_retry(
 ):
     from app.errors import ApiError
 
-    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    _seed_matching(session, user_a)
     draft = _make_comment_draft(session, user_a)
 
     async def failing_comment(pat, owner, repo, number, body):
@@ -1603,3 +1628,107 @@ def test_draft_serializer_carries_kind_target_and_matches(auth, session, user_a)
     items = client.get("/dev/drafts?status=review").json()["items"]
     fresh = next(i for i in items if i["title"] == "unmatched")
     assert fresh["related_issues"] is None
+
+
+def test_matcher_chunks_a_large_backlog_and_a_failed_chunk_retries(
+    monkeypatch, session, user_a
+):
+    """The prod-backlog lesson (2026-08-20): 78 drafts in ONE matcher call truncated at
+    the output budget and matched nothing. Drafts are chunked across calls (candidates
+    repeated, matches merged); a failed chunk skips ONLY itself — its drafts stay NULL
+    and are the only ones re-sent next scan."""
+    from app.dev import config as dev_config
+
+    monkeypatch.setattr(dev_config, "DEV_MATCH_DRAFT_CHUNK", 2)
+    _seed_matching(session, user_a)
+    drafts = [_make_draft(session, user_a, title=f"draft-{i}") for i in range(5)]
+    _patch_candidates(monkeypatch)
+
+    calls: list = []
+
+    async def fake_match(chunk, issue_cands, pr_cands):
+        calls.append(chunk)
+        if len(calls) == 2:
+            return None  # this chunk truncated / errored
+        return _matches((0, [(12, "issue", "medium")]))
+
+    monkeypatch.setattr(dev_svc.synth, "match_issues", fake_match)
+
+    tally = run(dev_svc._match_and_convert(session, user_a.id))
+    assert [len(c) for c in calls] == [2, 2, 1]  # 5 drafts → chunks of 2, 2, 1
+    assert tally["matching_skipped"] is True  # the failed chunk is reported…
+    assert tally["linked"] == 2  # …but the other chunks landed (index 0 of each)
+
+    for d in drafts:
+        session.refresh(d)
+    assert drafts[0].related_issues is not None and drafts[1].related_issues == "[]"
+    assert drafts[2].related_issues is None and drafts[3].related_issues is None
+    assert drafts[4].related_issues is not None
+
+    # Next scan: only the failed chunk's drafts are still NULL — exactly they re-send.
+    run(dev_svc._match_and_convert(session, user_a.id))
+    assert [len(c) for c in calls] == [2, 2, 1, 2]
+    assert {c["title"] for c in calls[3]} == {"draft-2", "draft-3"}
+
+
+# ── Goal 12b.1: catalog-wide matching (mis-tagged drafts) ─────────────────────
+
+
+def test_cross_repo_match_links_with_full_reference(monkeypatch, session, user_a):
+    """A mis-tagged draft (the synthesiser fell back to the wrong repo) still gets
+    linked: candidates are catalog-wide, and the Related line uses GitHub's cross-repo
+    `owner/repo#N` form so the reference auto-links from the wrong repo too."""
+    _seed_matching(session, user_a)
+    draft = _make_draft(session, user_a, repo="org/kaapi-web")  # the wrong tag
+    _patch_candidates(monkeypatch)  # issues/PRs exist only in org/kaapi-backend
+    _patch_matcher(
+        monkeypatch, _matches((0, [(12, "issue", "medium"), (45, "pr", "medium")]))
+    )
+
+    tally = run(dev_svc._match_and_convert(session, user_a.id))
+    assert tally["linked"] == 1
+    session.refresh(draft)
+    stored = json.loads(draft.related_issues)
+    assert stored[0]["repo"] == "org/kaapi-backend"
+    assert draft.body.endswith(
+        "**Related:** org/kaapi-backend#12, PR org/kaapi-backend#45 (merged)"
+    )
+    assert draft.repo == "org/kaapi-web"  # linking alone never re-tags
+
+
+def test_cross_repo_conversion_retags_the_draft(monkeypatch, session, user_a):
+    """The prod mis-tag scenario end-to-end: the real issue lives in another catalog
+    repo; a high-confidence match fetches THAT repo's thread, converts the draft, and
+    re-tags it to the target's repo — the comment files where the issue lives."""
+    _seed_matching(session, user_a)
+    draft = _make_draft(session, user_a, repo="org/kaapi-web")
+    _patch_candidates(monkeypatch, prs=[])
+    _patch_matcher(monkeypatch, _matches((0, [(12, "issue", "high")])))
+
+    async def fake_get_issue(pat, owner, repo, number):
+        assert f"{owner}/{repo}" == "org/kaapi-backend"  # the MATCH's repo, not the tag
+        return {
+            "number": number,
+            "title": "Login is broken",
+            "body": "x",
+            "state": "open",
+            "html_url": _ISSUE_CANDS[0]["html_url"],
+        }
+
+    async def fake_comments(pat, owner, repo, number):
+        return []
+
+    async def fake_draft_comment(d, thread, related_prs):
+        return CommentDraftResult(has_new_info=True, comment_markdown="Adding a repro.")
+
+    monkeypatch.setattr(dev_svc.github, "get_issue", fake_get_issue)
+    monkeypatch.setattr(dev_svc.github, "list_issue_comments", fake_comments)
+    monkeypatch.setattr(dev_svc.synth, "draft_comment", fake_draft_comment)
+
+    tally = run(dev_svc._match_and_convert(session, user_a.id))
+    assert tally["converted"] == 1
+    session.refresh(draft)
+    assert draft.kind == KIND_COMMENT
+    assert draft.repo == "org/kaapi-backend"  # re-tagged: comment lives with the issue
+    assert draft.target_issue_number == 12
+    assert draft.target_issue_url == _ISSUE_CANDS[0]["html_url"]

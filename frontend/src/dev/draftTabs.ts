@@ -23,6 +23,9 @@ export type DraftKind = "issue" | "comment";
  * the card can safely render `url` as a real anchor.
  */
 export interface RelatedMatch {
+  /** The match's repo full name (12b.1: matching is catalog-wide, so a match may
+   * live outside the draft's own repo). Absent only on pre-12b.1 stored rows. */
+  repo?: string;
   number: number;
   type: "issue" | "pr";
   state: string;

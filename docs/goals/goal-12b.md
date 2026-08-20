@@ -225,6 +225,24 @@ drafting needs to consult long threads selectively rather than reading them whol
   set. The synthesiser prompt stays **byte-identical to 12a** — prevention-at-synthesis is
   deliberately deferred (see out of scope).
 
+## Post-ship amendments (12b.1, 2026-08-20 — from the first prod run)
+
+Two field findings changed the shipped behaviour; `dev.md` and
+`architecture/dev-pipeline.md` carry the authoritative descriptions:
+
+1. **Matcher calls are chunked** (`DEV_MATCH_DRAFT_CHUNK`, default 20 drafts/call,
+   candidates repeated, matches merged code-side): the 78-draft backlog in one call
+   truncated at `DEV_MATCH_MAX_TOKENS` and matched nothing. A failed chunk skips only
+   itself.
+2. **Matching is catalog-wide, not per-repo**: the synthesiser sometimes tags the wrong
+   repo (out-of-catalog picks fall back to the default), and per-repo matching judged
+   those drafts against a repo whose issues could never match. Candidates now come from
+   every catalog repo (tagged with `repo`; validation keys on `(repo, number, type)`),
+   the `Related:` line uses `owner/repo#N` for cross-repo matches, conversion re-tags
+   the draft to the target issue's repo, and a repo change no longer clears
+   `related_issues`. (This supersedes the acceptance line "changing repo clears
+   matches".)
+
 ## Out of scope (do not build)
 
 - **Anything agentic.** No LLM tool use, no `gh` CLI, no LLM-issued GitHub calls — the

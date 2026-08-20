@@ -37,9 +37,16 @@ recorded in `docs/goals/goal-12b.md`).
 ## The 12b LLM steps (matcher + comment drafter — both in `synth.py`)
 
 - **Matcher** (`match_issues`, `DEV_MATCH_MODEL` default sonnet, streams with its own
-  `DEV_MATCH_MAX_TOKENS` budget — the `5c6b48e` truncation lesson): one call per repo
-  with unmatched drafts, run **after** `_dispose_synthesis` (the repo is only final
-  post-dispose). Its payload is EXACTLY the pinned field sets — drafts as
+  `DEV_MATCH_MAX_TOKENS` budget — the `5c6b48e` truncation lesson): runs **after**
+  `_dispose_synthesis`, **catalog-wide (12b.1)** — candidates come from EVERY
+  configured repo, each tagged with its `repo`, because the draft's own repo tag is
+  the synthesiser's guess and is sometimes wrong (prod mis-tags matched nothing under
+  per-repo scoping). The candidate fetch is all-or-nothing per scan (one repo's
+  transient failure aborts the phase so a true match is never silently missed; a
+  missing PAT only excludes that repo). Drafts are **chunked
+  `DEV_MATCH_DRAFT_CHUNK` (20) per call** (candidates repeated, matches merged
+  code-side) — the first prod backlog put 78 drafts in one call and truncated at 16k
+  output, matching nothing; a failed chunk skips only itself. Its payload is EXACTLY the pinned field sets — drafts as
   `DRAFT_MATCH_FIELDS` (`draft_index`, `title`, `body` — a positional index, never the
   DB id), issue candidates as `ISSUE_CANDIDATE_FIELDS` (`number`, `title`, `labels`),
   PR candidates as `PR_CANDIDATE_FIELDS` (`number`, `title`, `state`,
@@ -48,21 +55,27 @@ recorded in `docs/goals/goal-12b.md`).
 - **Matcher scope: the whole unfiled backlog, once per draft.** Every non-settled draft
   (`draft`/`saved`) whose `related_issues` IS NULL, whatever scan synthesised it;
   filed/dismissed never; already-matched (even `"[]"`) never again (the NULL-guard).
-  Changing a draft's repo resets `related_issues` to NULL (stale matches; re-matched on
-  the next scan — no live re-match).
-- **Matcher dispose:** every returned `(number, type)` is validated against the fetched
-  candidate set — out-of-set entries are dropped — and the stored `related_issues`
-  url/title/type/state come from the **code-fetched candidate list keyed by validated
-  number, never from LLM output**. The `**Related:** #N, PR #M (merged)` body line is
-  appended by code from validated matches only.
+  Changing a draft's repo KEEPS `related_issues` (12b.1: matches are judged against
+  the whole catalog, so re-targeting doesn't invalidate them — and clearing would
+  never re-match under the NULL-guard).
+- **Matcher dispose:** every returned `(repo, number, type)` is validated against the
+  fetched candidate set — out-of-set entries (wrong repo included) are dropped — and
+  the stored `related_issues` repo/url/title/type/state come from the **code-fetched
+  candidate list keyed by the validated (repo, number), never from LLM output**. The
+  `**Related:** #N, PR #M (merged)` body line is appended by code from validated
+  matches only; a match outside the draft's repo uses GitHub's cross-repo
+  `owner/repo#N` form.
 - **Comment drafter** (`draft_comment`, reuses `DEV_MODEL` — this text faces humans on
   GitHub; own `DEV_COMMENT_MAX_TOKENS` budget): runs only for a draft whose top
   **issue** match is `high` confidence. Input: the draft + that ONE issue's body and
   comment thread (+ a high-matched PR's title/description/commit subjects). Output
   `{has_new_info, comment_markdown}` → code converts the draft to `kind=comment` (body
   replaced by the comment markdown — explicit owner sign-off — target set from the
-  validated match, project cleared) or flags the match `nothing_new: true` and leaves
-  an issue draft for the **human** to dismiss — never auto-dismiss.
+  validated match, project cleared, and **`repo` re-tagged to the target issue's repo**
+  when the match is cross-repo: the comment lives with the issue, which also heals a
+  synthesiser mis-tag; tokens route by the match's owner) or flags the match
+  `nothing_new: true` and leaves an issue draft for the **human** to dismiss — never
+  auto-dismiss.
 - **PRs are never comment targets.** A PR-only match stays a linked issue draft;
   commenting targets issues exclusively.
 - **Steps are best-effort.** Any GitHub-read/matcher/drafter failure leaves plain issue

@@ -352,11 +352,19 @@ export function useDevConfig() {
     return data.repos;
   }, []);
 
-  const listProjects = useCallback(async (repo: string): Promise<Project[]> => {
-    const data = await apiGet<{ projects: Project[] }>(
+  // Cached per repo for the session: every visible card asks for its repo's projects,
+  // so an uncached fetch multiplies by the lane size (a 78-card backlog hammered the
+  // endpoint with identical requests). A failed fetch is evicted so it can retry.
+  const projectsCache = useRef<Map<string, Promise<Project[]>>>(new Map());
+  const listProjects = useCallback((repo: string): Promise<Project[]> => {
+    const cached = projectsCache.current.get(repo);
+    if (cached) return cached;
+    const fetched = apiGet<{ projects: Project[] }>(
       `/dev/config/projects?repo=${encodeURIComponent(repo)}`,
-    );
-    return data.projects;
+    ).then((data) => data.projects);
+    fetched.catch(() => projectsCache.current.delete(repo));
+    projectsCache.current.set(repo, fetched);
+    return fetched;
   }, []);
 
   // The @-mention typeahead's member list (goal 12b) — fetched lazily the first time

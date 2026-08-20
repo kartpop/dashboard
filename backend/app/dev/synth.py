@@ -155,32 +155,39 @@ async def synthesise(
 
 # ── Goal 12b: the matcher (LLM call 2) ────────────────────────────────────────
 #
-# One call per repo that has unmatched drafts: that repo's drafts (title + body) vs its
-# typed candidate lists. Wide but cheap — MANY candidates, titles/excerpts only, no
-# bodies. The pinned field sets below are the whole matcher contract: no doc ids, no
-# tokens, no candidate URLs (code re-derives url/title/state from the fetched list by
-# validated number — ids/URLs that code acts on never come from the model).
+# Chunked calls over the unmatched drafts (title + body + tagged repo) vs the typed
+# candidates from EVERY catalog repo, each tagged with its repo (12b.1 — the draft's
+# repo tag is the synthesiser's guess and may be wrong, so matching is catalog-wide).
+# Wide but cheap — MANY candidates, titles/excerpts only, no bodies. The pinned field
+# sets below are the whole matcher contract: no doc ids, no tokens, no candidate URLs
+# (code re-derives url/title/state from the fetched list by the validated
+# (repo, number) pair — ids/URLs that code acts on never come from the model).
 
-DRAFT_MATCH_FIELDS = ("draft_index", "title", "body")
-ISSUE_CANDIDATE_FIELDS = ("number", "title", "labels")
-PR_CANDIDATE_FIELDS = ("number", "title", "state", "description_excerpt")
+DRAFT_MATCH_FIELDS = ("draft_index", "title", "body", "repo")
+ISSUE_CANDIDATE_FIELDS = ("repo", "number", "title", "labels")
+PR_CANDIDATE_FIELDS = ("repo", "number", "title", "state", "description_excerpt")
 
 _MATCH_SYSTEM = """You are a de-duplication judge for GitHub issue drafts. You are \
-given DRAFTS (proposed new issues for one repository) and two CANDIDATE lists from \
-that same repository: its OPEN ISSUES and its recent OPEN/MERGED PULL REQUESTS. You \
-have no other GitHub access and take no action.
+given DRAFTS (proposed new issues) and two CANDIDATE lists spanning ALL of the user's \
+configured repositories: their OPEN ISSUES and their recent OPEN/MERGED PULL REQUESTS. \
+Every candidate is tagged with its `repo`. You have no other GitHub access and take no \
+action.
 
 For each draft, decide which candidates (if any) already cover the same underlying \
 work:
 - An open issue describing the same bug/feature is a match even if worded differently.
 - A PR (open or merged) whose title/description says it implements or fixes the \
 draft's work is a match.
+- A draft's own `repo` field is only the drafting system's GUESS at where it belongs \
+and is sometimes wrong — a candidate from a DIFFERENT repo that covers the same work \
+is still a match. Same-repo candidates deserve a closer look first, but never limit \
+yourself to them.
 - Confidence 'high' means you would stake the call on it: same underlying work, not \
 merely the same area. 'medium' means probably related. Omit anything weaker — most \
 drafts match NOTHING, and an empty matches list is the expected common answer.
 
-Return each match's number and type exactly as given in the input. Output ONLY the \
-structured result."""
+Return each match's repo, number and type exactly as given in the input. Output ONLY \
+the structured result."""
 
 
 def build_match_payload(
@@ -192,7 +199,12 @@ def build_match_payload(
     carry extra keys (html_url, updated_at from the fetch); only the pinned fields are
     serialized, so no URL or timestamp reaches the prompt."""
     d_out = [
-        {"draft_index": i, "title": d.get("title"), "body": d.get("body")}
+        {
+            "draft_index": i,
+            "title": d.get("title"),
+            "body": d.get("body"),
+            "repo": d.get("repo"),
+        }
         for i, d in enumerate(drafts)
     ]
     i_out = [{k: c.get(k) for k in ISSUE_CANDIDATE_FIELDS} for c in issue_candidates]
@@ -203,14 +215,17 @@ def build_match_payload(
 def build_match_prompt(
     drafts: list[dict], issue_candidates: list[dict], pr_candidates: list[dict]
 ) -> tuple[str, str]:
-    """Build (system, user) for one repo's match call. Pure — no I/O. Inputs are
-    exactly `build_match_payload`'s output."""
+    """Build (system, user) for one match call. Pure — no I/O. Inputs are exactly
+    `build_match_payload`'s output."""
     user = (
-        "OPEN ISSUES (candidates; match by number, type 'issue'):\n"
+        "OPEN ISSUES (candidates across the user's repos; match by repo + number, "
+        "type 'issue'):\n"
         f"{json.dumps(issue_candidates, ensure_ascii=False)}\n\n"
-        "OPEN/MERGED PULL REQUESTS (candidates; match by number, type 'pr'):\n"
+        "OPEN/MERGED PULL REQUESTS (candidates across the user's repos; match by "
+        "repo + number, type 'pr'):\n"
         f"{json.dumps(pr_candidates, ensure_ascii=False)}\n\n"
-        "DRAFTS (judge each against the candidates above):\n"
+        "DRAFTS (judge each against ALL the candidates above — the draft's own repo "
+        "tag may be wrong):\n"
         f"{json.dumps(drafts, ensure_ascii=False)}"
     )
     return _MATCH_SYSTEM, user

@@ -38,16 +38,33 @@ function draft(over: Partial<DevDraft> = {}): DevDraft {
 }
 
 describe("matchLabel", () => {
-  it("labels an issue by number + title", () => {
-    expect(matchLabel(match())).toBe("#12 Login is broken");
+  it("labels a same-repo issue by number + title", () => {
+    expect(matchLabel(match({ repo: "org/repo" }), "org/repo")).toBe(
+      "#12 Login is broken",
+    );
+    // Pre-12b.1 stored matches have no repo — treated as same-repo.
+    expect(matchLabel(match(), "org/repo")).toBe("#12 Login is broken");
   });
 
   it("labels a PR with its type badge and state", () => {
     expect(
       matchLabel(
         match({ number: 45, type: "pr", state: "merged", title: "Fix login" }),
+        "org/repo",
       ),
     ).toBe("PR #45 (merged) Fix login");
+  });
+
+  it("prefixes a cross-repo match with its repo (12b.1)", () => {
+    expect(matchLabel(match({ repo: "org/backend" }), "org/frontend")).toBe(
+      "org/backend#12 Login is broken",
+    );
+    expect(
+      matchLabel(
+        match({ repo: "org/backend", number: 45, type: "pr", state: "open" }),
+        "org/frontend",
+      ),
+    ).toBe("PR org/backend#45 (open) Login is broken");
   });
 });
 

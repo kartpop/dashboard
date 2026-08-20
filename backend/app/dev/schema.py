@@ -64,6 +64,11 @@ class SynthesisResult(BaseModel):
 class ProposedMatch(BaseModel):
     """One candidate the model believes covers (part of) a draft."""
 
+    repo: str = Field(
+        description="The candidate's repo full name (owner/name), exactly as given "
+        "in the input — candidates span all the user's repos and numbers are only "
+        "unique within one repo."
+    )
     number: int = Field(
         description="The candidate's number, exactly as given in the input."
     )

@@ -303,15 +303,10 @@ function DraftCard({
   };
 
   const onRepoChange = (repo: string) => {
-    // Changing the repo clears the project (the old one belongs to the old repo) AND
-    // the similar-issue matches (they were judged against the old repo's issues/PRs —
-    // the server clears them too; the next scan re-matches, no live re-match).
-    onPatch(draft.id, {
-      repo,
-      project_node_id: null,
-      project_title: null,
-      related_issues: null,
-    });
+    // Changing the repo clears the project (the old one belongs to the old repo).
+    // The similar-issue matches SURVIVE (12b.1): they were judged against the whole
+    // catalog, so re-targeting the draft doesn't invalidate them.
+    onPatch(draft.id, { repo, project_node_id: null, project_title: null });
   };
 
   const onProjectChange = (nodeId: string) => {
@@ -453,7 +448,7 @@ function DraftCard({
                 rel="noopener noreferrer"
                 title={m.reason}
               >
-                {matchLabel(m)} ↗
+                {matchLabel(m, draft.repo)} ↗
               </a>
               {m.nothing_new && (
                 <em className="dev-nothing-new">

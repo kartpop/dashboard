@@ -167,12 +167,14 @@ class DevIssueDraft(SQLModel, table=True):
     # never from LLM output). NULL on issue drafts.
     target_issue_number: Optional[int] = Field(default=None)
     target_issue_url: Optional[str] = Field(default=None)
-    # JSON array of validated matches against live GitHub —
-    # [{number, type: issue|pr, state, url, title, confidence, reason, nothing_new?}].
+    # JSON array of validated matches against live GitHub — [{repo, number,
+    # type: issue|pr, state, url, title, confidence, reason, nothing_new?}].
     # NULL = not yet matched (the NULL-guard: the matcher targets non-settled drafts
     # whose related_issues IS NULL, once per draft); "[]" = matched, nothing found.
-    # Every url/title/type/state comes from the code-fetched candidate list keyed by
-    # validated number — never from the model. Cleared (back to NULL) on a repo change.
+    # Matching is CATALOG-wide (12b.1): candidates come from every configured repo, so
+    # a match may live outside the draft's own repo tag and a repo change does NOT
+    # clear the list. Every repo/url/title/type/state comes from the code-fetched
+    # candidate list keyed by the validated (repo, number) — never from the model.
     related_issues: Optional[str] = Field(default=None)
     # Set the moment issue creation succeeds (partial-state idempotency): once present,
     # a re-file never re-creates the issue — only the project-attach step may retry.

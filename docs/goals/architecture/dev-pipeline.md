@@ -38,8 +38,8 @@ flowchart TB
     end
 
     subgraph dedup ["Dedup against live GitHub — goal 12b"]
-        H --> I["Fetch candidates per repo<br/>(open issues ≤200, open+merged PRs ≤100)"]
-        I --> J{"Issue matcher<br/>LLM 3 · sonnet · one call per repo"}
+        H --> I["Fetch candidates from EVERY catalog repo<br/>(open issues ≤200 + open/merged PRs ≤100 per repo)"]
+        I --> J{"Issue matcher<br/>LLM 3 · sonnet · catalog-wide, chunked ~20 drafts/call"}
         J --> K["Dispose: validate numbers vs fetched set,<br/>store links, append Related: line"]
         K -- "top ISSUE match is high-confidence" --> L["Fetch that one issue's thread<br/>(+ matched PR's commit subjects)"]
         L --> M{"Comment drafter<br/>LLM 4 · opus · one call per draft"}
@@ -64,7 +64,7 @@ Four LLM calls, each bounded and single-purpose:
 |---|------|------------------|------|---------|---------------|
 | 1 | Router classifier | haiku (`ROUTER_MODEL`) | The capture text (≤1200-char excerpt) + the notes hierarchy as **paths only** | `{destination, confidence, fields}` | 2048 |
 | 2 | Issue synthesiser | opus (`DEV_MODEL`) | All new note entries (text + doc path + timestamp) + repo catalog + do-not-redraft titles | Proposed issues `{title, body, repo, sources[]}` | `DEV_MAX_TOKENS` = 32000, streamed |
-| 3 | Issue matcher | sonnet (`DEV_MATCH_MODEL`) | Draft titles+bodies + candidate issue titles/labels + PR titles/states/excerpts | Per draft: `matches: [{number, type, confidence, reason}]` | `DEV_MATCH_MAX_TOKENS` = 16000, streamed |
+| 3 | Issue matcher | sonnet (`DEV_MATCH_MODEL`) | Draft titles+bodies+repo tags + repo-tagged candidates from EVERY catalog repo (issue titles/labels; PR titles/states/excerpts), ~20 drafts per call | Per draft: `matches: [{repo, number, type, confidence, reason}]` | `DEV_MATCH_MAX_TOKENS` = 16000, streamed |
 | 4 | Comment drafter | opus (`DEV_MODEL`) | One draft + ONE issue's body + comments (+ matched PR metadata + commit subject lines) | `{has_new_info, comment_markdown}` | `DEV_COMMENT_MAX_TOKENS` = 8000, streamed |
 
 What no LLM ever sees: Drive ids, folder ids, GitHub PATs, candidate URLs, repo member
@@ -168,10 +168,10 @@ sequenceDiagram
     S->>DB: persist drafts (repo validated vs catalog)
     S->>DB: advance cursors (only now, only on success)
     Note over S,LLM4: goal 12b tail - best-effort, never blocks the scan
-    loop per repo with unmatched drafts
-        S->>GH: list_open_issues (≤200) + list_recent_prs (≤100)
-        S->>LLM3: drafts vs typed candidates
-        LLM3-->>S: matches (numbers + confidence)
+    S->>GH: list_open_issues + list_recent_prs for EVERY catalog repo
+    loop per chunk of ~20 unmatched drafts
+        S->>LLM3: draft chunk vs repo-tagged candidates from all repos
+        LLM3-->>S: matches (repo + number + confidence)
         S->>DB: validate vs fetched set, store links, append Related: line
         opt top ISSUE match is high-confidence
             S->>GH: get_issue + comments (+ PR commit subjects if PR matched high)
@@ -221,10 +221,15 @@ pipeline existed.
 non-settled draft (statuses `draft` and `saved`) whose `related_issues` column is still
 NULL — regardless of which scan created it. Dismissed and filed drafts are never matched;
 a draft that has been matched (even to an empty `[]`) is never re-matched. Changing a
-draft's repo resets its matches to NULL (they were judged against the wrong repo's
-candidates), so the *next* scan re-matches it — there is no live re-match.
+draft's repo keeps its matches (12b.1: they were judged against the whole catalog, so
+re-targeting doesn't invalidate them).
 
-**Candidate fetch (code):** per repo with unmatched drafts, using the owner-routed PAT:
+**Candidate fetch (code):** for EVERY repo in the catalog — not just the repos drafts
+are tagged with, because the tag is the synthesiser's guess and is sometimes wrong
+(12b.1: prod mis-tags matched nothing under per-repo scoping). Each candidate is tagged
+with its `repo`; the fetch is all-or-nothing per scan (one repo's transient failure
+aborts the phase so a true match is never silently missed; a repo whose owner has no
+stored token is excluded and reported). Per repo, using the owner-routed PAT:
 
 - `list_open_issues` — `GET /repos/{o}/{r}/issues?state=open&sort=updated`, capped at
   `DEV_ISSUE_FETCH_CAP` (200) most-recently-updated. Open state deliberately, **not** a
@@ -236,21 +241,25 @@ candidates), so the *next* scan re-matches it — there is no live re-match.
   (abandoned). The list response already carries each PR's body, truncated code-side to a
   ~400-char excerpt — PR candidates cost zero extra calls.
 
-**The matcher (LLM 3, sonnet, one call per repo):** sees that repo's unmatched drafts
-(positional index + title + body — never the DB id) against the typed candidates (issues
-as number/title/labels; PRs as number/title/state/excerpt). No URLs, no tokens. It
-returns, per draft, `matches: [{number, type, confidence, reason}]`, streamed with its
-own 16k budget so the first post-deploy backlog pass cannot truncate.
+**The matcher (LLM 3, sonnet):** sees the repo's unmatched drafts (positional index +
+title + body — never the DB id) against the typed candidates (issues as
+number/title/labels; PRs as number/title/state/excerpt). No URLs, no tokens. It returns,
+per draft, `matches: [{number, type, confidence, reason}]`, streamed with a 16k output
+budget. Drafts are **chunked `DEV_MATCH_DRAFT_CHUNK` (default 20) per call** — the
+candidates repeat in each call and the matches merge code-side — so no single call's
+output can outgrow the budget however large the backlog (the first prod backlog run put
+78 drafts in one call, truncated at 16k, and matched nothing; a truncated call is a
+failure, and with chunking a failed chunk skips only its own drafts).
 
 **Dispose (code):**
 
 ```mermaid
 flowchart LR
-    A["Matcher returns<br/>(number, type, confidence, reason)"] --> B{"(number, type) in the<br/>code-fetched candidate set?"}
-    B -- no --> C["Dropped silently<br/>(hallucinated or mistyped)"]
-    B -- yes --> D["Stored match: url, title, state<br/>taken FROM THE FETCH, keyed by number<br/>(only confidence + reason are the model's)"]
+    A["Matcher returns<br/>(repo, number, type, confidence, reason)"] --> B{"(repo, number, type) in the<br/>code-fetched candidate set?"}
+    B -- no --> C["Dropped silently<br/>(wrong repo, bogus number, or mistyped)"]
+    B -- yes --> D["Stored match: repo, url, title, state<br/>taken FROM THE FETCH, keyed by (repo, number)<br/>(only confidence + reason are the model's)"]
     D --> E["related_issues JSON on the draft<br/>(empty array = matched, nothing found)"]
-    E --> F["Code appends to the body:<br/>**Related:** #123, PR #45 (merged)"]
+    E --> F["Code appends to the body:<br/>**Related:** #123, PR #45 (merged)<br/>(cross-repo matches use owner/repo#N)"]
 ```
 
 The stored `related_issues` is what the card renders — and because every URL in it came
@@ -275,7 +284,9 @@ targets — a PR-only match stays a linked issue draft):
    carry anything the thread doesn't already have?*
    - **Yes** → `{has_new_info: true, comment_markdown}`. Code mutates the draft:
      `kind = "comment"`, `target_issue_number`/`target_issue_url` set **from the
-     validated match** (never from the LLM), body **replaced** by the comment markdown
+     validated match** (never from the LLM), `repo` **re-tagged to the target issue's
+     repo** when the match is cross-repo (the comment lives with the issue — this also
+     heals a synthesiser mis-tag), body **replaced** by the comment markdown
      (explicit owner sign-off — the original body is superseded; the title survives for
      display and the do-not-redraft list), project preselect cleared. Secondary matches
      (the PR) stay in a `Related:` line inside the comment; the target issue itself is
@@ -318,9 +329,9 @@ Every card is editable while pending (title, body, and — for issue drafts — 
 project). Card affordances added by 12b:
 
 - **The Similar line** — the validated matches as real anchors (`#123 title ↗`,
-  `PR #45 (merged) title ↗`), each opening in a new tab. This is the clickable pre-file
-  affordance: the body's `Related:` text line lives in a plain textarea and only becomes
-  a link once filed on GitHub.
+  `PR #45 (merged) title ↗`; a cross-repo match reads `owner/repo#123 title ↗`), each
+  opening in a new tab. This is the clickable pre-file affordance: the body's `Related:`
+  text line lives in a plain textarea and only becomes a link once filed on GitHub.
 - **The comment badge** — a comment card's header reads "Comment on {repo}#{n} ↗" and its
   repo/project dropdowns are hidden (the target is fixed; re-targeting a comment means
   dismissing it — the API enforces this with a 409).
@@ -386,7 +397,8 @@ selectively rather than reading them whole.
 | `DEV_MODEL` | opus | Synthesiser + comment drafter (human-facing text) |
 | `DEV_MAX_TOKENS` | 32000 | Synthesiser output (streams; raise for a huge first backlog) |
 | `DEV_MATCH_MODEL` | `claude-sonnet-5` | The matcher |
-| `DEV_MATCH_MAX_TOKENS` | 16000 | Matcher output (streams) |
+| `DEV_MATCH_MAX_TOKENS` | 16000 | Matcher output per call (streams) |
+| `DEV_MATCH_DRAFT_CHUNK` | 20 | Drafts per matcher call (bounds each call's output) |
 | `DEV_COMMENT_MAX_TOKENS` | 8000 | Comment drafter output |
 | `DEV_ISSUE_FETCH_CAP` | 200 | Open-issue candidates per repo |
 | `DEV_PR_FETCH_CAP` | 100 | PR candidates per repo |
@@ -401,7 +413,7 @@ selectively rather than reading them whole.
 | A source Doc fails to read | That Doc is skipped; others proceed; its cursor untouched | Nothing — next scan retries |
 | Synthesis errors or truncates | `None` → **no drafts stored, no cursor advanced**; tally says `synthesis failed … will re-scan` | Nothing (or raise `DEV_MAX_TOKENS` if it keeps truncating) |
 | GitHub candidate fetch fails | That repo's match phase skipped; drafts persist with NULL matches; tally says `match check skipped` | Nothing — next scan retries the NULL drafts |
-| Matcher errors or truncates | Same as above, per repo | Nothing (or raise `DEV_MATCH_MAX_TOKENS`) |
+| Matcher errors or truncates | That **chunk** of drafts skipped (stays NULL, retried next scan); other chunks proceed | Nothing (persistent truncation: raise `DEV_MATCH_MAX_TOKENS` or lower `DEV_MATCH_DRAFT_CHUNK`) |
 | Thread fetch / drafter fails | Draft stays a linked issue draft (no conversion) | Nothing |
 | Issue filing: create OK, project-attach fails | `filed` with "attach pending"; retry re-runs only the attach | Click retry on the card |
 | Comment filing fails | Draft untouched, still `draft` | Click Approve & file again |
@@ -413,13 +425,18 @@ The 12b migration (`d4e5f6a7b8c9`) backfills every existing draft with `kind="is
 `related_issues = NULL`. NULL is the matcher's work queue — so **the first scan after
 deploying processes the entire lingering backlog**: every review + saved draft gets
 matched, linked, and (where a high-confidence issue match carries new info) converted to
-a comment draft. That first scan runs one matcher call per distinct repo in the backlog
-and one drafter call per conversion; the tally reports
-`N linked …, M converted …`. Nothing fires at deploy time itself — the work happens on
-the next scan, whether that's a manual **Create now** click or the 9 PM IST cron,
-whichever comes first. If a repo's call fails or truncates that day, its drafts simply
-stay NULL and retry the next scan. (Side benefit: draining the backlog un-saturates the
-60-title do-not-redraft list, restoring cross-scan dedup headroom.)
+a comment draft. That first scan runs one matcher call per ~20 drafts per repo (chunked)
+and one drafter call per conversion; the tally reports `N linked …, M converted …`.
+Nothing fires at deploy time itself — the work happens on the next scan, whether that's
+a manual **Create now** click or the 9 PM IST cron, whichever comes first. If a chunk's
+call fails or truncates that day, its drafts simply stay NULL and retry the next scan.
+(Side benefit: draining the backlog un-saturates the 60-title do-not-redraft list,
+restoring cross-scan dedup headroom. Field notes, 2026-08-20 — the first prod run
+surfaced two fixes now folded in above: the pre-chunking build sent all 78 backlog
+drafts in one call, truncated at 16k output, and matched nothing (→ chunking); and
+per-repo matching judged synthesiser-mis-tagged drafts against a repo whose issues
+could never match (→ catalog-wide matching, with a one-time migration re-queuing
+matched-empty unfiled drafts).)
 
 ---
 
