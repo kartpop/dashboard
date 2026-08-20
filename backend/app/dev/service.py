@@ -1068,6 +1068,100 @@ def _flip_status(session: Session, draft: DevIssueDraft, status: str) -> DevIssu
 
 # ── GitHub filing (the human-approved write; partial-state idempotent) ────────
 
+# Per filing step: the fallback error code, what the step was trying to do (phrased to
+# drop into a sentence), and the fine-grained-PAT permission it needs. The permission
+# differs per step — creating an issue and commenting want Issues, the project attach
+# wants Projects — which is exactly the distinction a single "github write failed"
+# message loses.
+_FILE_STEPS = {
+    "create": ("github_create_failed", "create the issue", "Issues: Read and write"),
+    "comment": ("github_comment_failed", "post the comment", "Issues: Read and write"),
+    "attach": (
+        "github_project_attach_failed",
+        "attach the issue to the project",
+        "Projects: Read and write",
+    ),
+}
+
+
+def _filing_error(
+    step: str, exc: github.GithubError, *, draft_id: int, owner: str, repo: str
+) -> ApiError:
+    """Turn a `GithubError` into the specific thing the user can go fix, and log it.
+
+    Two constraints shape this. The HTTP status stays 502 for every case: the failure
+    IS upstream, and a 401 would trip the frontend's session handler and sign the user
+    out over a stale GitHub token. So all the diagnosis has to ride in the code and the
+    message. And GitHub only ever names the symptom — "Bad credentials", "Resource not
+    accessible by personal access token" — never which of the several things the user
+    controls (token freshness, the token's repo set, its permissions, the repo's own
+    settings) is the one at fault. Each branch below names that instead, and keeps
+    GitHub's own words appended so nothing is hidden."""
+    generic, what, permission = _FILE_STEPS[step]
+    status, reason = exc.status, exc.message
+    lowered = reason.lower()
+    # A fine-grained PAT that cannot see a repo gets a 404, not a 403 — GitHub hides
+    # existence rather than admitting the repo is off-limits, so both statuses collapse
+    # onto one remedy. GraphQL (the attach step) reports the same class of failure as a
+    # scope complaint inside a 200, which reaches us as 422.
+    denied = status in (403, 404) or (
+        status == 422
+        and any(w in lowered for w in ("scope", "permission", "not authorized"))
+    )
+
+    if status == 0:
+        code = "github_unreachable"
+        fix = f"Could not reach GitHub to {what}. Check the host's network, then retry."
+    elif status == 401:
+        code = "github_token_invalid"
+        fix = (
+            f"GitHub rejected the stored token for '{owner}' while trying to {what}. "
+            "Fine-grained tokens expire — add a fresh one in the Dev config."
+        )
+    elif status in (403, 429) and "rate limit" in lowered:
+        code = "github_rate_limited"
+        fix = (
+            f"GitHub rate-limited the attempt to {what}. Wait a few minutes, then "
+            "retry — nothing was written."
+        )
+    elif denied:
+        code = "github_no_permission"
+        fix = (
+            f"The token for '{owner}' is not allowed to {what} on {repo}. Check that "
+            f"'{repo}' is in the token's selected repositories and that the token "
+            f"grants '{permission}'."
+        )
+    elif status == 410:
+        code = "github_issues_disabled"
+        fix = f"Issues are turned off on {repo}, so the app cannot {what}."
+    elif status == 422:
+        code = "github_rejected"
+        fix = f"GitHub rejected the request to {what} as invalid."
+    elif status >= 500:
+        code = "github_server_error"
+        fix = f"GitHub itself failed while trying to {what}. Retry in a few minutes."
+    else:
+        code = generic
+        fix = f"GitHub would not {what}."
+
+    _log.warning(
+        "draft %s: could not %s on %s — %s (GitHub %s: %s)",
+        draft_id,
+        what,
+        repo,
+        code,
+        status or "unreachable",
+        reason,
+    )
+    # "GitHub said" would be a lie when GitHub never answered — a transport failure's
+    # detail is ours, and its text already leads with the same "could not reach" phrase.
+    detail = (
+        reason.removeprefix("Could not reach GitHub: ")
+        if status == 0
+        else f"GitHub said: {reason}"
+    )
+    return ApiError(502, code, f"{fix} ({detail})")
+
 
 async def file_draft(session: Session, user_id: int, draft_id: int) -> DevIssueDraft:
     """File the draft on GitHub (human-approved) — the only GitHub mutation path.
@@ -1082,8 +1176,9 @@ async def file_draft(session: Session, user_id: int, draft_id: int) -> DevIssueD
     with the comment URL; failure leaves the draft untouched for a retry click.
     Comments are the only mutation ever applied to a pre-existing GitHub object.
 
-    Filing needs a valid PAT; a GitHub failure surfaces as an `ApiError`
-    (rollback-not-blind-retry)."""
+    Filing needs a valid PAT; a GitHub failure surfaces as an `ApiError` built by
+    `_filing_error`, which names the remedy for THIS step rather than echoing GitHub's
+    symptom, and logs the reason host-side (rollback-not-blind-retry)."""
     draft = _owned_draft(session, user_id, draft_id)
     if draft.status == DISMISSED:
         raise ApiError(409, "draft_dismissed", "A dismissed draft cannot be filed.")
@@ -1113,7 +1208,9 @@ async def file_draft(session: Session, user_id: int, draft_id: int) -> DevIssueD
                     pat, owner, repo_name, draft.target_issue_number, draft.body
                 )
             except github.GithubError as exc:
-                raise ApiError(502, "github_comment_failed", exc.message) from exc
+                raise _filing_error(
+                    "comment", exc, draft_id=draft.id, owner=owner, repo=draft.repo
+                ) from exc
             draft.issue_url = created["url"]  # the COMMENT's html_url
             draft.issue_number = draft.target_issue_number
             draft.status = FILED
@@ -1130,7 +1227,9 @@ async def file_draft(session: Session, user_id: int, draft_id: int) -> DevIssueD
                 pat, owner, repo_name, draft.title, draft.body
             )
         except github.GithubError as exc:
-            raise ApiError(502, "github_create_failed", exc.message) from exc
+            raise _filing_error(
+                "create", exc, draft_id=draft.id, owner=owner, repo=draft.repo
+            ) from exc
         draft.issue_number = created["number"]
         draft.issue_url = created["url"]
         draft.issue_node_id = created["node_id"]
@@ -1147,7 +1246,9 @@ async def file_draft(session: Session, user_id: int, draft_id: int) -> DevIssueD
                 pat, draft.project_node_id, draft.issue_node_id
             )
         except github.GithubError as exc:
-            raise ApiError(502, "github_project_attach_failed", exc.message) from exc
+            raise _filing_error(
+                "attach", exc, draft_id=draft.id, owner=owner, repo=draft.repo
+            ) from exc
         draft.project_attached = True
         draft.updated_at = _now()
         session.add(draft)

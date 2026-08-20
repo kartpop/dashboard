@@ -25,6 +25,24 @@ from app.settings.router import router as settings_router  # noqa: E402
 
 _log = logging.getLogger(__name__)
 
+# Give the app's own loggers a handler and a format. Uvicorn configures only its
+# `uvicorn.*` loggers (each with `propagate=False`) and never touches the root logger,
+# so without this every `app.*` log line falls through to logging's last-resort
+# handler — bare text, no timestamp, no level, no logger name, and nothing below
+# WARNING at all. That is how a failed GitHub write came to leave no trace but a 502 in
+# the access log. Uvicorn applies its own config before importing this module, so
+# configuring root here cannot be clobbered by it.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+# Handing root a handler also un-silences chatty dependencies — httpx logs a line per
+# request, which would bury the app's own lines. Keep them at WARNING so they speak up
+# only when something is actually wrong.
+for _noisy in ("httpx", "httpcore", "googleapiclient.discovery_cache"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 # In dev a fixed fallback keeps sessions stable across reloads; production MUST set
 # SESSION_SECRET (an unset secret in prod would sign cookies with a public default).
 _SESSION_SECRET = os.environ.get("SESSION_SECRET") or "dev-insecure-session-secret"

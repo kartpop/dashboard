@@ -1788,3 +1788,100 @@ def test_transient_fetch_failure_aborts_the_whole_match_phase(
     assert tally == {"linked": 0, "converted": 0, "matching_skipped": True}
     session.refresh(draft)
     assert draft.related_issues is None  # still queued — retried next scan
+
+
+# ── Filing failures: a granular code + an actionable message ──────────────────
+
+
+@pytest.mark.parametrize(
+    "status,reason,code,expect_in",
+    [
+        (
+            0,
+            "Could not reach GitHub: ConnectTimeout",
+            "github_unreachable",
+            "ConnectTimeout",
+        ),
+        (401, "Bad credentials", "github_token_invalid", "Bad credentials"),
+        (403, "API rate limit exceeded", "github_rate_limited", "rate limit"),
+        (
+            403,
+            "Resource not accessible by personal access token",
+            "github_no_permission",
+            "selected repositories",
+        ),
+        (404, "Not Found", "github_no_permission", "selected repositories"),
+        (410, "Issues are disabled", "github_issues_disabled", "turned off"),
+        (422, "Validation Failed", "github_rejected", "Validation Failed"),
+        (500, "Server Error", "github_server_error", "GitHub itself failed"),
+    ],
+)
+def test_filing_failure_maps_to_a_granular_code(
+    monkeypatch, session, user_a, status, reason, code, expect_in
+):
+    """Every filing failure stays HTTP 502 (a 401 would sign the browser out over a
+    stale GitHub token), so the CODE is what distinguishes them — and GitHub's own words
+    survive in the message."""
+    from app.errors import ApiError
+
+    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    draft = _make_draft(session, user_a)
+
+    async def failing_create(pat, owner, repo, title, body):
+        raise gh.GithubError(status, reason)
+
+    monkeypatch.setattr(dev_svc.github, "create_issue", failing_create)
+
+    with pytest.raises(ApiError) as ei:
+        run(dev_svc.file_draft(session, user_a.id, draft.id))
+    assert ei.value.status_code == 502
+    assert ei.value.detail["code"] == code
+    assert expect_in in ei.value.detail["message"]
+
+
+def test_permission_message_names_the_step_s_own_permission(
+    monkeypatch, session, user_a
+):
+    """The remedy differs per step: creating an issue wants Issues:write, the project
+    attach wants Projects:write. One blanket "GitHub write failed" loses exactly that."""
+    from app.errors import ApiError
+
+    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    draft = _make_draft(session, user_a)
+
+    async def ok_create(pat, owner, repo, title, body):
+        return {"number": 9, "url": "https://github.com/org/x/issues/9", "node_id": "N"}
+
+    async def denied_attach(pat, project_node_id, issue_node_id):
+        raise gh.GithubError(422, "Your token has not been granted the required scopes")
+
+    monkeypatch.setattr(dev_svc.github, "create_issue", ok_create)
+    monkeypatch.setattr(dev_svc.github, "add_issue_to_project", denied_attach)
+
+    with pytest.raises(ApiError) as ei:
+        run(dev_svc.file_draft(session, user_a.id, draft.id))
+    msg = ei.value.detail["message"]
+    assert ei.value.detail["code"] == "github_no_permission"
+    assert "Projects: Read and write" in msg  # not Issues — this was the attach step
+    assert "org/kaapi-backend" in msg  # and it names the repo to go check
+
+
+def test_file_endpoint_returns_the_reason_in_the_error_envelope(
+    monkeypatch, auth, session, user_a
+):
+    """The browser's only view of the failure is `error.message` — assert it arrives
+    there, since a bare 502 in the access log is what made this invisible before."""
+    _enable_dev(session, user_a)
+    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    draft = _make_draft(session, user_a)
+
+    async def failing_create(pat, owner, repo, title, body):
+        raise gh.GithubError(403, "Resource not accessible by personal access token")
+
+    monkeypatch.setattr(dev_svc.github, "create_issue", failing_create)
+
+    resp = auth.as_user(user_a).post(f"/dev/{draft.id}/file")
+    assert resp.status_code == 502
+    err = resp.json()["error"]
+    assert err["code"] == "github_no_permission"
+    assert "Issues: Read and write" in err["message"]

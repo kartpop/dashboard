@@ -2516,6 +2516,20 @@ h1, h2, h3 {
   font-size: 13px;
 }
 
+/* Why an Approve & file click did not land, on the card that failed. The view-level
+   .dev-error says the same thing above the tabs, which is out of sight once the lane is
+   scrolled — this is the copy the eye is already pointed at. */
+.dev-card-error {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--error);
+  border-left: 4px solid var(--error);
+  border-radius: 6px;
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 /* The last scan's tally — what "Create now" actually did, in one muted line. */
 .dev-scan-tally {
   margin: 0 0 12px;

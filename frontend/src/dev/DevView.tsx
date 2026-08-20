@@ -94,7 +94,11 @@ export function DevView() {
         />
       )}
 
-      {dev.error && <p className="dev-error">{dev.error}</p>}
+      {dev.error && (
+        <p className="dev-error" role="alert">
+          {dev.error}
+        </p>
+      )}
 
       {/* What the scan you just ran actually did. A scan that reads a Doc and draws no
           draft from it (the work is already filed) looks exactly like a Doc that was
@@ -269,6 +273,7 @@ function DraftCard({
   const [body, setBody] = useState(draft.body);
   const [projects, setProjects] = useState<Project[]>([]);
   const [filing, setFiling] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
   // A shelved card is still actionable (goal 12a) — `saved` is a shelf, not a freeze.
   const editable = draft.status === "draft" || draft.status === "saved";
   // A comment draft's target is fixed (goal 12b): the repo/project dropdowns hide —
@@ -319,8 +324,14 @@ function DraftCard({
 
   const doFile = async () => {
     setFiling(true);
+    setFileError(null);
     try {
       await onFile(draft.id);
+    } catch (e) {
+      // Filing is the one action whose failure needs to be readable without moving:
+      // the view-level banner sits above the tabs, off-screen once the lane is
+      // scrolled down to the card you just clicked. So the reason lands here too.
+      setFileError((e as Error).message);
     } finally {
       setFiling(false);
     }
@@ -536,6 +547,12 @@ function DraftCard({
           </>
         )}
       </div>
+
+      {fileError && (
+        <p className="dev-card-error" role="alert">
+          {fileError}
+        </p>
+      )}
     </article>
   );
 }

@@ -42,6 +42,11 @@ const PAGE_LIMIT = 20;
  * write fires without a reload), matching the dashboard's optimistic-write convention.
  * Filing is NOT optimistic: a GitHub write is consequential, so we await it and reload
  * the card from the server (issue link / partial-attach state come back authoritative).
+ *
+ * `error` is only ever set by a failed ACTION and only ever cleared when the user
+ * starts another one. A successful background fetch deliberately leaves it alone: the
+ * recovery path of a failed action is a reload, so clearing on fetch-success wiped
+ * every filing error milliseconds after it was set.
  */
 export function useDevPanel() {
   const [tabs, setTabs] = useState<TabsState>(emptyTabs);
@@ -66,7 +71,6 @@ export function useDevPanel() {
       setLastScanAt(meta.last_scan_at);
       setConfigComplete(meta.config_complete);
       setCounts(meta.counts);
-      setError(null);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -92,7 +96,6 @@ export function useDevPanel() {
         if (cursor) q.set("cursor", cursor);
         const page = await apiGet<DraftPage>(`/dev/drafts?${q}`);
         setTabs((prev) => appendPage(prev, tab, page, reset));
-        setError(null);
       } catch (e) {
         setError((e as Error).message);
         setTabs((prev) => setTabLoading(prev, tab, false));
@@ -139,6 +142,7 @@ export function useDevPanel() {
   const scanNow = useCallback(async () => {
     setScanning(true);
     setLastTally(null);
+    setError(null);
     try {
       // Keep the tally: "2 docs · 2 new entries · 0 drafts" is the only thing that tells
       // a suppressed-as-already-filed entry apart from a source Doc that never got read.
@@ -158,6 +162,7 @@ export function useDevPanel() {
 
   const patchDraft = useCallback((id: number, patch: Partial<DevDraft>) => {
     // Optimistic: update the card now, fire the write without awaiting/reloading.
+    setError(null);
     setTabs((prev) => patchDraftEverywhere(prev, id, patch));
     void apiPatch(`/dev/${id}`, patch).catch((e) =>
       setError((e as Error).message),
@@ -178,6 +183,7 @@ export function useDevPanel() {
       const from = activeTab;
       const draft = tabs[from].items.find((d) => d.id === id);
       if (!draft) return;
+      setError(null);
       const moved = { ...draft, status };
       setTabs((prev) => moveDraft(prev, from, moved));
       setCounts((prev) => bumpCounts(prev, from, tabForStatus(status)));
@@ -211,17 +217,23 @@ export function useDevPanel() {
     async (id: number) => {
       const from = activeTab;
       const before = tabs[from].items.find((d) => d.id === id);
+      setError(null);
       try {
         const updated = await apiPost<DevDraft>(`/dev/${id}/file`, {});
         setTabs((prev) => replaceDraft(prev, from, updated));
         if (before && before.status !== "filed") {
           setCounts((prev) => bumpCounts(prev, from, "filed"));
         }
-        setError(null);
       } catch (e) {
         setError((e as Error).message);
         // Reload so a partial (issue created, attach pending) surfaces correctly.
-        void reload();
+        // Awaited, not fire-and-forget, so the card stays in its "Filing…" state until
+        // the lanes actually reflect what GitHub did.
+        await reload();
+        // Rethrown for the card, which shows the reason inline next to the button that
+        // failed. The banner above the tabs stays set too — a partial file moves the
+        // row to the Filed lane, unmounting the card and its inline message with it.
+        throw e;
       }
     },
     [activeTab, reload, tabs],

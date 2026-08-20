@@ -16,8 +16,13 @@ review threads, file contents, or CI status.
 Deterministic code only — no LLM ever reaches this module. A non-2xx response raises
 `GithubError(status, message)`, which the service maps to an `ApiError`; the caller
 records partial state (the issue number the moment creation succeeds) so a retry never
-double-creates. The module-level `httpx` calls are wrapped so tests monkeypatch the
-public functions directly.
+double-creates. Every failure is also logged on the way out (`_fail` / `_unreachable`),
+because a failed write otherwise leaves nothing behind but a 502 in the access log —
+the reason only ever existed in the response body the browser threw away. The PAT is
+never logged: it travels in a header, and only the method + path are recorded.
+
+The module-level `httpx` calls are wrapped so tests monkeypatch the public functions
+directly.
 """
 
 from __future__ import annotations
@@ -60,6 +65,59 @@ def _reason(resp: httpx.Response) -> str:
     return (msg or resp.reason_phrase or "GitHub request failed")[:300]
 
 
+def _op(request) -> str:
+    """A short PAT-free label for the log line — `POST /repos/owner/name/issues`. The
+    token travels in a header, never the URL, so the path is safe to log verbatim."""
+    try:
+        return f"{request.method} {request.url.path}"
+    except Exception:  # a request object we could not read is not worth failing over
+        return "request"
+
+
+def _headers_note(resp: httpx.Response) -> str:
+    """The two headers that turn a bare 403/404 into a diagnosis: which permission the
+    endpoint actually wanted (`x-accepted-github-permissions`, which GitHub sends when
+    it rejects a fine-grained PAT) and whether we simply ran out of quota."""
+    bits = []
+    wanted = resp.headers.get("x-accepted-github-permissions")
+    if wanted:
+        bits.append(f"needs={wanted}")
+    remaining = resp.headers.get("x-ratelimit-remaining")
+    if remaining is not None:
+        bits.append(f"ratelimit_remaining={remaining}")
+    return f" [{'; '.join(bits)}]" if bits else ""
+
+
+def _fail(resp: httpx.Response) -> GithubError:
+    """Log a non-2xx and return the `GithubError` for it.
+
+    EVERY GitHub failure in this module goes through here, because the reason has
+    exactly one other place to live: the response body the browser gets. A click that
+    fails leaves the app returning a bare 502 in the access log, so without this line
+    the host has no record of why — which is the whole point of logging it here."""
+    reason = _reason(resp)
+    _log.warning(
+        "github %s failed: HTTP %s — %s%s",
+        _op(resp.request),
+        resp.status_code,
+        reason,
+        _headers_note(resp),
+    )
+    return GithubError(resp.status_code, reason)
+
+
+def _unreachable(exc: Exception) -> GithubError:
+    """Log a transport failure (DNS, TLS, timeout — GitHub never answered) and return
+    its `GithubError`. Status 0 marks "no HTTP status exists", not "GitHub said no"."""
+    _log.warning(
+        "github %s unreachable: %s: %s",
+        _op(getattr(exc, "request", None)),
+        type(exc).__name__,
+        exc,
+    )
+    return GithubError(0, f"Could not reach GitHub: {exc}")
+
+
 async def validate_pat(pat: str) -> dict:
     """Ping the viewer endpoint (`GET /user`) to confirm the PAT is valid.
 
@@ -71,9 +129,9 @@ async def validate_pat(pat: str) -> dict:
                 f"{config.GITHUB_API_BASE}/user", headers=_auth(pat)
             )
         except httpx.HTTPError as exc:
-            raise GithubError(0, f"Could not reach GitHub: {exc}") from exc
+            raise _unreachable(exc) from exc
     if resp.status_code // 100 != 2:
-        raise GithubError(resp.status_code, _reason(resp))
+        raise _fail(resp)
     data = resp.json()
     return {"login": data.get("login"), "name": data.get("name")}
 
@@ -94,9 +152,9 @@ async def list_repos(pat: str, *, max_pages: int = 10) -> list[dict]:
                     params={"per_page": 100, "page": page, "sort": "full_name"},
                 )
             except httpx.HTTPError as exc:
-                raise GithubError(0, f"Could not reach GitHub: {exc}") from exc
+                raise _unreachable(exc) from exc
             if resp.status_code // 100 != 2:
-                raise GithubError(resp.status_code, _reason(resp))
+                raise _fail(resp)
             batch = resp.json()
             if not isinstance(batch, list) or not batch:
                 break
@@ -123,9 +181,9 @@ async def _get_json(pat: str, url: str, params: dict | None = None):
         try:
             resp = await client.get(url, headers=_auth(pat), params=params)
         except httpx.HTTPError as exc:
-            raise GithubError(0, f"Could not reach GitHub: {exc}") from exc
+            raise _unreachable(exc) from exc
     if resp.status_code // 100 != 2:
-        raise GithubError(resp.status_code, _reason(resp))
+        raise _fail(resp)
     return resp.json()
 
 
@@ -336,7 +394,9 @@ query($owner: String!, $name: String!) {
 """.strip()
 
 
-async def _graphql(pat: str, query: str, variables: dict) -> dict:
+async def _graphql(pat: str, query: str, variables: dict, *, op: str) -> dict:
+    """One GraphQL call. `op` names the operation for the log — both callers hit the
+    same `/graphql` path, so the URL alone cannot tell an attach from a project list."""
     async with httpx.AsyncClient(timeout=config.GITHUB_TIMEOUT) as client:
         try:
             resp = await client.post(
@@ -345,13 +405,18 @@ async def _graphql(pat: str, query: str, variables: dict) -> dict:
                 json={"query": query, "variables": variables},
             )
         except httpx.HTTPError as exc:
-            raise GithubError(0, f"Could not reach GitHub: {exc}") from exc
+            raise _unreachable(exc) from exc
     if resp.status_code // 100 != 2:
-        raise GithubError(resp.status_code, _reason(resp))
+        raise _fail(resp)
     data = resp.json()
     if isinstance(data, dict) and data.get("errors"):
+        # GraphQL reports failure INSIDE a 200 — including permission failures, which
+        # REST would have sent as a 403. So this needs its own log line; `_fail` never
+        # sees it. Status 422 is our own label for "GitHub answered, and said no".
         first = data["errors"][0] if data["errors"] else {}
-        raise GithubError(422, (first.get("message") or "GraphQL error")[:300])
+        reason = (first.get("message") or "GraphQL error")[:300]
+        _log.warning("github graphql %s failed: %s", op, reason)
+        raise GithubError(422, reason)
     return data.get("data") or {}
 
 
@@ -360,7 +425,9 @@ async def list_projects_for_repo(pat: str, owner: str, repo: str) -> list[dict]:
 
     Returns `[{node_id, title, number}]`. The user picks the repo's default project from
     this list; the per-card dropdown can override at file time."""
-    data = await _graphql(pat, _PROJECTS_QUERY, {"owner": owner, "name": repo})
+    data = await _graphql(
+        pat, _PROJECTS_QUERY, {"owner": owner, "name": repo}, op="projectsV2"
+    )
     nodes = ((data.get("repository") or {}).get("projectsV2") or {}).get("nodes") or []
     return [
         {"node_id": n.get("id"), "title": n.get("title"), "number": n.get("number")}
@@ -383,9 +450,9 @@ async def create_issue(pat: str, owner: str, repo: str, title: str, body: str) -
                 json={"title": title, "body": body},
             )
         except httpx.HTTPError as exc:
-            raise GithubError(0, f"Could not reach GitHub: {exc}") from exc
+            raise _unreachable(exc) from exc
     if resp.status_code // 100 != 2:
-        raise GithubError(resp.status_code, _reason(resp))
+        raise _fail(resp)
     data = resp.json()
     return {
         "number": data.get("number"),
@@ -414,6 +481,7 @@ async def add_issue_to_project(
         pat,
         _ADD_TO_PROJECT,
         {"projectId": project_node_id, "contentId": issue_node_id},
+        op="addProjectV2ItemById",
     )
     item = (data.get("addProjectV2ItemById") or {}).get("item") or {}
     return item.get("id") or ""
@@ -434,8 +502,8 @@ async def create_issue_comment(
                 json={"body": body},
             )
         except httpx.HTTPError as exc:
-            raise GithubError(0, f"Could not reach GitHub: {exc}") from exc
+            raise _unreachable(exc) from exc
     if resp.status_code // 100 != 2:
-        raise GithubError(resp.status_code, _reason(resp))
+        raise _fail(resp)
     data = resp.json()
     return {"url": data.get("html_url")}
