@@ -21,16 +21,27 @@ import pytest
 from sqlmodel import select
 
 from app.auth.models import AllowedEmail
+from app.dev import github as gh
 from app.dev import service as dev_svc
 from app.dev.models import (
     DISMISSED,
     DRAFT,
     FILED,
+    KIND_COMMENT,
+    KIND_ISSUE,
     SAVED,
     DevDocCursor,
     DevIssueDraft,
 )
-from app.dev.schema import ProposedIssue, SourceRef, SynthesisResult
+from app.dev.schema import (
+    CommentDraftResult,
+    DraftMatches,
+    MatchResult,
+    ProposedIssue,
+    ProposedMatch,
+    SourceRef,
+    SynthesisResult,
+)
 from app.settings import notes_index
 from app.settings import service as settings_svc
 from tests.conftest import DummyCreds
@@ -38,6 +49,20 @@ from tests.conftest import DummyCreds
 
 def run(coro):
     return asyncio.run(coro)
+
+
+@pytest.fixture(autouse=True)
+def _github_offline(monkeypatch):
+    """Goal 12b gave `run_scan` a live-GitHub match tail, so no test may leave GitHub
+    HTTP reachable: any un-stubbed call raises `GithubError` at client construction —
+    the scan's best-effort match phase then reports itself skipped instead of touching
+    the network. Tests that exercise the HTTP layer monkeypatch `gh.httpx.AsyncClient`
+    over this; tests that exercise matching stub the `gh` functions themselves."""
+
+    def _no_network(**kwargs):
+        raise gh.GithubError(0, "network disabled in tests")
+
+    monkeypatch.setattr(gh.httpx, "AsyncClient", _no_network)
 
 
 # ── Fixture builders ──────────────────────────────────────────────────────────
@@ -417,8 +442,8 @@ def test_no_action_items_yields_no_draft(monkeypatch, session, user_a):
 def _make_draft(session, user, **over) -> DevIssueDraft:
     d = DevIssueDraft(
         user_id=user.id,
-        title="Fix bug",
-        body="body",
+        title=over.pop("title", "Fix bug"),
+        body=over.pop("body", "body"),
         repo=over.pop("repo", "org/kaapi-backend"),
         status=over.pop("status", DRAFT),
         sources="[]",
@@ -831,3 +856,750 @@ def test_cron_scans_only_flagged_configured_users(
 
     run(dev_sched._tick_all_users())
     assert scanned == [user_a.id]  # user_b (unflagged) never scanned
+
+
+# ── Goal 12b: GitHub read path ────────────────────────────────────────────────
+
+
+class _FakeResp:
+    def __init__(self, data, status=200):
+        self._data = data
+        self.status_code = status
+        self.reason_phrase = "err"
+
+    def json(self):
+        return self._data
+
+
+def _fake_httpx(monkeypatch, route, calls):
+    """Point `github.py`'s httpx.AsyncClient at canned responses. `route(url, params)`
+    returns a `_FakeResp`; every request is appended to `calls` for spy assertions."""
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            calls.append((url, dict(params or {})))
+            return route(url, dict(params or {}))
+
+        async def post(self, url, headers=None, json=None):
+            calls.append((url, json))
+            return route(url, json)
+
+    monkeypatch.setattr(gh.httpx, "AsyncClient", _Client)
+
+
+def test_list_open_issues_filters_prs_and_caps(monkeypatch):
+    """The issues endpoint interleaves PRs (rows with a `pull_request` key — the known
+    gotcha); those are filtered out, and the fetch caps at DEV_ISSUE_FETCH_CAP."""
+    from app.dev import config as dev_config
+
+    monkeypatch.setattr(dev_config, "DEV_ISSUE_FETCH_CAP", 3)
+    rows = [
+        {
+            "number": 1,
+            "title": "A",
+            "labels": [{"name": "bug"}],
+            "html_url": "u1",
+            "updated_at": "t1",
+        },
+        {
+            "number": 2,
+            "title": "a PR in disguise",
+            "pull_request": {"url": "x"},
+            "html_url": "u2",
+            "updated_at": "t2",
+        },
+        {"number": 3, "title": "B", "labels": [], "html_url": "u3", "updated_at": "t3"},
+        {"number": 4, "title": "C", "labels": [], "html_url": "u4", "updated_at": "t4"},
+        {"number": 5, "title": "D", "labels": [], "html_url": "u5", "updated_at": "t5"},
+    ]
+    calls: list = []
+    _fake_httpx(monkeypatch, lambda url, p: _FakeResp(rows), calls)
+
+    out = run(gh.list_open_issues("PAT", "org", "repo"))
+    assert [i["number"] for i in out] == [1, 3, 4]  # PR row skipped, capped at 3
+    assert out[0]["labels"] == ["bug"]
+    assert set(out[0]) == {"number", "title", "labels", "html_url", "updated_at"}
+    # The fetch asked for open issues, most recently updated first.
+    url, params = calls[0]
+    assert url.endswith("/repos/org/repo/issues")
+    assert params["state"] == "open" and params["sort"] == "updated"
+
+
+def test_list_recent_prs_keeps_open_and_merged_skips_abandoned(monkeypatch):
+    from app.dev import config as dev_config
+
+    monkeypatch.setattr(dev_config, "DEV_PR_FETCH_CAP", 10)
+    rows = [
+        {
+            "number": 10,
+            "title": "Open PR",
+            "state": "open",
+            "merged_at": None,
+            "body": "x" * 1000,
+            "html_url": "p1",
+            "updated_at": "t",
+        },
+        {
+            "number": 11,
+            "title": "Merged PR",
+            "state": "closed",
+            "merged_at": "2026-01-01T00:00:00Z",
+            "body": None,
+            "html_url": "p2",
+            "updated_at": "t",
+        },
+        {
+            "number": 12,
+            "title": "Abandoned PR",
+            "state": "closed",
+            "merged_at": None,
+            "body": "gone",
+            "html_url": "p3",
+            "updated_at": "t",
+        },
+    ]
+    calls: list = []
+    _fake_httpx(monkeypatch, lambda url, p: _FakeResp(rows), calls)
+
+    out = run(gh.list_recent_prs("PAT", "org", "repo"))
+    assert [(p["number"], p["state"]) for p in out] == [(10, "open"), (11, "merged")]
+    assert len(out[0]["description_excerpt"]) == 400  # truncated code-side
+    assert set(out[0]) == {
+        "number",
+        "title",
+        "state",
+        "description_excerpt",
+        "html_url",
+        "updated_at",
+    }
+
+
+def test_candidate_fetch_makes_zero_commit_calls(monkeypatch):
+    """Commit subjects are fetched ONLY for a matched PR at the drafter stage — the
+    candidate fetches never call `/pulls/{n}/commits` (call-count spy)."""
+    calls: list = []
+    _fake_httpx(monkeypatch, lambda url, p: _FakeResp([]), calls)
+    run(gh.list_open_issues("PAT", "org", "repo"))
+    run(gh.list_recent_prs("PAT", "org", "repo"))
+    assert calls  # both fetches happened…
+    assert not any("/commits" in url for url, _ in calls)  # …and no commit call did
+
+
+def test_list_pr_commit_subjects_first_lines_only(monkeypatch):
+    calls: list = []
+    rows = [
+        {"commit": {"message": "feat: add login\n\nlong body\nwith details"}},
+        {"commit": {"message": "fix typo"}},
+    ]
+    _fake_httpx(monkeypatch, lambda url, p: _FakeResp(rows), calls)
+    out = run(gh.list_pr_commit_subjects("PAT", "org", "repo", 45))
+    assert out == ["feat: add login", "fix typo"]  # subjects, never bodies
+    assert calls[0][0].endswith("/pulls/45/commits")
+
+
+# ── Goal 12b: matcher prompt contract + streaming ─────────────────────────────
+
+
+def test_match_payload_pinned_fields_no_urls_ids_or_logins():
+    """The matcher payload is EXACTLY the pinned field sets — candidate URLs, doc ids,
+    tokens, and member logins never reach the prompt (the `ENTRY_FIELDS` pattern)."""
+    from app.dev import synth
+
+    drafts = [
+        {"id": 77, "title": "T", "body": "B", "repo": "org/x", "doc_id": "SECRET_DOC"}
+    ]
+    issues = [
+        {
+            "number": 1,
+            "title": "I",
+            "labels": ["bug"],
+            "html_url": "https://SECRET_ISSUE_URL",
+            "updated_at": "ts",
+        }
+    ]
+    prs = [
+        {
+            "number": 2,
+            "title": "P",
+            "state": "merged",
+            "description_excerpt": "d",
+            "html_url": "https://SECRET_PR_URL",
+            "updated_at": "ts",
+            "login": "SECRET_LOGIN",
+        }
+    ]
+
+    d, i, p = synth.build_match_payload(drafts, issues, prs)
+    assert set(d[0]) == set(synth.DRAFT_MATCH_FIELDS)
+    assert set(i[0]) == set(synth.ISSUE_CANDIDATE_FIELDS)
+    assert set(p[0]) == set(synth.PR_CANDIDATE_FIELDS)
+    assert d[0]["draft_index"] == 0  # positional index, never the DB id
+
+    _system, user = synth.build_match_prompt(d, i, p)
+    for secret in (
+        "SECRET_DOC",
+        "SECRET_ISSUE_URL",
+        "SECRET_PR_URL",
+        "SECRET_LOGIN",
+        "github_pat",
+        '"id": 77',
+    ):
+        assert secret not in user
+    assert "I" in user and "P" in user and "T" in user
+
+
+class _FakeMessage:
+    def __init__(self, parsed, stop_reason="end_turn"):
+        self.parsed_output = parsed
+        self.stop_reason = stop_reason
+
+
+def _fake_anthropic(monkeypatch, message, seen):
+    from app.dev import synth
+
+    class _Stream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get_final_message(self):
+            return message
+
+    class _Messages:
+        def stream(self, **kwargs):
+            seen.update(kwargs)
+            return _Stream()
+
+    class _Client:
+        def __init__(self):
+            self.messages = _Messages()
+
+    monkeypatch.setattr(synth.anthropic, "AsyncAnthropic", _Client)
+
+
+def test_matcher_streams_with_its_own_model_and_budget(monkeypatch):
+    """`match_issues` streams (the `5c6b48e` lesson: a 50+ draft backlog must not
+    truncate) with DEV_MATCH_MODEL / DEV_MATCH_MAX_TOKENS, and a max_tokens stop is a
+    FAILURE (None — drafts stay NULL and retry), not an empty answer."""
+    from app.dev import config as dev_config
+    from app.dev import synth
+
+    parsed = MatchResult(drafts=[DraftMatches(draft_index=0, matches=[])])
+    seen: dict = {}
+    _fake_anthropic(monkeypatch, _FakeMessage(parsed), seen)
+    out = run(synth.match_issues([{"title": "t", "body": "b"}], [], []))
+    assert out is parsed
+    assert seen["model"] == dev_config.DEV_MATCH_MODEL
+    assert seen["max_tokens"] == dev_config.DEV_MATCH_MAX_TOKENS
+
+    _fake_anthropic(monkeypatch, _FakeMessage(None, stop_reason="max_tokens"), {})
+    assert run(synth.match_issues([{"title": "t", "body": "b"}], [], [])) is None
+
+
+def test_comment_drafter_uses_dev_model_and_its_own_budget(monkeypatch):
+    from app.dev import config as dev_config
+    from app.dev import synth
+
+    parsed = CommentDraftResult(has_new_info=False, comment_markdown=None)
+    seen: dict = {}
+    _fake_anthropic(monkeypatch, _FakeMessage(parsed), seen)
+    out = run(
+        synth.draft_comment(
+            {"title": "t", "body": "b"},
+            {"number": 1, "title": "i", "body": "x", "comments": []},
+            [],
+        )
+    )
+    assert out is parsed
+    assert seen["model"] == dev_config.DEV_MODEL  # human-facing text → the opus knob
+    assert seen["max_tokens"] == dev_config.DEV_COMMENT_MAX_TOKENS
+
+
+# ── Goal 12b: match dispose + conversion ──────────────────────────────────────
+
+_ISSUE_CANDS = [
+    {
+        "number": 12,
+        "title": "Login is broken",
+        "labels": ["bug"],
+        "html_url": "https://github.com/org/kaapi-backend/issues/12",
+        "updated_at": "t",
+    },
+]
+_PR_CANDS = [
+    {
+        "number": 45,
+        "title": "Fix login flow",
+        "state": "merged",
+        "description_excerpt": "fixes login",
+        "html_url": "https://github.com/org/kaapi-backend/pull/45",
+        "updated_at": "t",
+    },
+]
+
+
+def _patch_candidates(monkeypatch, issues=_ISSUE_CANDS, prs=_PR_CANDS):
+    async def fake_issues(pat, owner, repo):
+        return issues
+
+    async def fake_prs(pat, owner, repo):
+        return prs
+
+    monkeypatch.setattr(dev_svc.github, "list_open_issues", fake_issues)
+    monkeypatch.setattr(dev_svc.github, "list_recent_prs", fake_prs)
+
+
+def _patch_matcher(monkeypatch, result, calls=None):
+    async def fake_match(drafts, issue_cands, pr_cands):
+        if calls is not None:
+            calls.append(drafts)
+        return result
+
+    monkeypatch.setattr(dev_svc.synth, "match_issues", fake_match)
+
+
+def _matches(*pairs) -> MatchResult:
+    """(draft_index, [(number, type, confidence), …]) tuples → a MatchResult."""
+    return MatchResult(
+        drafts=[
+            DraftMatches(
+                draft_index=idx,
+                matches=[
+                    ProposedMatch(
+                        number=n, type=t, confidence=c, reason="looks the same"
+                    )
+                    for n, t, c in ms
+                ],
+            )
+            for idx, ms in pairs
+        ]
+    )
+
+
+def test_match_dispose_drops_out_of_set_and_takes_urls_from_the_fetch(
+    monkeypatch, session, user_a
+):
+    """Every LLM-returned (number, type) outside the fetched candidate set is dropped,
+    and the stored url/title/type/state come from the code-fetched list — never from
+    the model. The `Related:` body line is built code-side from validated matches."""
+    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    draft = _make_draft(session, user_a, project_node_id=None, project_title=None)
+    _patch_candidates(monkeypatch)
+    # A bogus number (999) and a mistyped pair (45 as issue) — both must be dropped.
+    _patch_matcher(
+        monkeypatch,
+        _matches(
+            (
+                0,
+                [
+                    (12, "issue", "medium"),
+                    (45, "pr", "medium"),
+                    (999, "issue", "high"),
+                    (45, "issue", "high"),
+                ],
+            )
+        ),
+    )
+
+    tally = run(dev_svc._match_and_convert(session, user_a.id))
+    assert tally == {"linked": 1, "converted": 0, "matching_skipped": False}
+
+    session.refresh(draft)
+    stored = json.loads(draft.related_issues)
+    assert [(m["number"], m["type"]) for m in stored] == [(12, "issue"), (45, "pr")]
+    assert stored[0]["url"] == _ISSUE_CANDS[0]["html_url"]  # provably from the fetch
+    assert stored[0]["title"] == "Login is broken" and stored[0]["state"] == "open"
+    assert (
+        stored[1]["url"] == _PR_CANDS[0]["html_url"] and stored[1]["state"] == "merged"
+    )
+    assert draft.body.endswith("**Related:** #12, PR #45 (merged)")
+    assert draft.kind == KIND_ISSUE  # medium confidence never converts
+
+
+def test_high_issue_match_with_new_info_converts_to_comment_draft(
+    monkeypatch, session, user_a
+):
+    """The full conversion: thread fetched for the ONE matched issue, commit subjects
+    for the ONE high-matched PR, drafter says has_new_info → kind=comment with target
+    set from the validated match, body replaced, project cleared — and the draft stays
+    in its lane (never auto-dismissed, never auto-filed)."""
+    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    draft = _make_draft(session, user_a)  # carries a project preselect
+    _patch_candidates(monkeypatch)
+    _patch_matcher(
+        monkeypatch, _matches((0, [(12, "issue", "high"), (45, "pr", "high")]))
+    )
+
+    fetched: list = []
+
+    async def fake_get_issue(pat, owner, repo, number):
+        fetched.append(("issue", number))
+        return {
+            "number": number,
+            "title": "Login is broken",
+            "body": "old body",
+            "state": "open",
+            "html_url": _ISSUE_CANDS[0]["html_url"],
+        }
+
+    async def fake_comments(pat, owner, repo, number):
+        fetched.append(("comments", number))
+        return [{"author": "octocat", "body": "any news?", "created_at": "t"}]
+
+    async def fake_subjects(pat, owner, repo, number):
+        fetched.append(("commits", number))
+        return ["fix: login flow"]
+
+    monkeypatch.setattr(dev_svc.github, "get_issue", fake_get_issue)
+    monkeypatch.setattr(dev_svc.github, "list_issue_comments", fake_comments)
+    monkeypatch.setattr(dev_svc.github, "list_pr_commit_subjects", fake_subjects)
+
+    drafter_in: dict = {}
+
+    async def fake_draft_comment(d, thread, related_prs):
+        drafter_in.update({"draft": d, "thread": thread, "prs": related_prs})
+        return CommentDraftResult(
+            has_new_info=True, comment_markdown="New repro: happens on Safari too."
+        )
+
+    monkeypatch.setattr(dev_svc.synth, "draft_comment", fake_draft_comment)
+
+    tally = run(dev_svc._match_and_convert(session, user_a.id))
+    assert tally["linked"] == 1 and tally["converted"] == 1
+
+    session.refresh(draft)
+    assert draft.kind == KIND_COMMENT
+    assert draft.target_issue_number == 12
+    assert draft.target_issue_url == _ISSUE_CANDS[0]["html_url"]  # from the fetch
+    assert draft.body.startswith("New repro: happens on Safari too.")
+    assert "PR #45 (merged)" in draft.body  # secondary link still lands in the comment
+    assert "#12" not in draft.body  # the target itself is excluded from Related
+    assert draft.project_node_id is None and draft.project_title is None
+    assert draft.status == DRAFT  # still the human's decision
+    # Thread fetched once, commit subjects only for the matched PR (45).
+    assert fetched == [("issue", 12), ("comments", 12), ("commits", 45)]
+    assert drafter_in["prs"][0]["commit_subjects"] == ["fix: login flow"]
+
+
+def test_pr_only_high_match_stays_a_linked_issue_draft(monkeypatch, session, user_a):
+    """PRs are never comment targets: a draft whose only high match is a PR keeps
+    kind=issue and no thread fetch or drafter call ever happens."""
+    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    draft = _make_draft(session, user_a)
+    _patch_candidates(monkeypatch, issues=[])
+    _patch_matcher(monkeypatch, _matches((0, [(45, "pr", "high")])))
+
+    def explode(*a, **k):
+        raise AssertionError("a PR-only match must not fetch threads or draft comments")
+
+    monkeypatch.setattr(dev_svc.github, "get_issue", explode)
+    monkeypatch.setattr(dev_svc.synth, "draft_comment", explode)
+
+    tally = run(dev_svc._match_and_convert(session, user_a.id))
+    assert tally["linked"] == 1 and tally["converted"] == 0
+    session.refresh(draft)
+    assert draft.kind == KIND_ISSUE and draft.target_issue_number is None
+    assert json.loads(draft.related_issues)[0]["type"] == "pr"
+
+
+def test_nothing_new_flags_the_match_and_never_auto_dismisses(
+    monkeypatch, session, user_a
+):
+    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    draft = _make_draft(session, user_a)
+    _patch_candidates(monkeypatch, prs=[])
+    _patch_matcher(monkeypatch, _matches((0, [(12, "issue", "high")])))
+
+    async def fake_get_issue(pat, owner, repo, number):
+        return {
+            "number": number,
+            "title": "Login is broken",
+            "body": "covers it all",
+            "state": "open",
+            "html_url": _ISSUE_CANDS[0]["html_url"],
+        }
+
+    async def fake_comments(pat, owner, repo, number):
+        return []
+
+    async def nothing_new(d, thread, related_prs):
+        return CommentDraftResult(has_new_info=False, comment_markdown=None)
+
+    monkeypatch.setattr(dev_svc.github, "get_issue", fake_get_issue)
+    monkeypatch.setattr(dev_svc.github, "list_issue_comments", fake_comments)
+    monkeypatch.setattr(dev_svc.synth, "draft_comment", nothing_new)
+
+    tally = run(dev_svc._match_and_convert(session, user_a.id))
+    assert tally["converted"] == 0
+    session.refresh(draft)
+    assert draft.kind == KIND_ISSUE
+    assert draft.status == DRAFT  # flagged, not auto-dismissed — the human decides
+    top = json.loads(draft.related_issues)[0]
+    assert top["number"] == 12 and top.get("nothing_new") is True
+
+
+def test_matcher_scope_whole_unsettled_backlog_once_per_draft(
+    monkeypatch, session, user_a
+):
+    """The matcher targets every non-settled draft (review + saved) whose
+    related_issues is NULL — filed/dismissed never, already-matched never again."""
+    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    in_review = _make_draft(session, user_a, status=DRAFT)
+    shelved = _make_draft(session, user_a, status=SAVED)
+    _make_draft(session, user_a, status=FILED)
+    _make_draft(session, user_a, status=DISMISSED)
+    already = _make_draft(session, user_a, status=DRAFT, related_issues="[]")
+
+    _patch_candidates(monkeypatch)
+    calls: list = []
+    _patch_matcher(monkeypatch, MatchResult(drafts=[]), calls)
+
+    run(dev_svc._match_and_convert(session, user_a.id))
+    assert len(calls) == 1
+    assert len(calls[0]) == 2  # exactly the review + saved NULL drafts
+
+    # Second pass: both got "[]" stored — nothing left to match, no LLM call.
+    run(dev_svc._match_and_convert(session, user_a.id))
+    assert len(calls) == 1
+    session.refresh(in_review)
+    session.refresh(shelved)
+    session.refresh(already)
+    assert in_review.related_issues == "[]" and shelved.related_issues == "[]"
+    assert already.related_issues == "[]"
+
+
+def test_scan_with_raising_github_read_still_persists_and_advances(
+    monkeypatch, session, user_a
+):
+    """A GitHub read failure degrades the repo to 'no match info': drafts persist
+    (related_issues NULL), the cursor advances, and the tally says matching was
+    skipped — a read failure never blocks synthesis output."""
+    _seed_config(session, user_a, sources=["d1"], repos=_REPOS, docs_forest=_FOREST)
+    _patch_docs(
+        monkeypatch, {"DOC1": _doc(("x", "6-July-2026, 8:41 PM IST", None, "b"))}
+    )
+    result = SynthesisResult(
+        issues=[
+            ProposedIssue(
+                title="Fix login",
+                body_markdown="body",
+                repo="org/kaapi-backend",
+                sources=[],
+            )
+        ]
+    )
+    _patch_synth(monkeypatch, result, [])
+
+    async def raising_fetch(pat, owner, repo):
+        raise gh.GithubError(500, "boom")
+
+    monkeypatch.setattr(dev_svc.github, "list_open_issues", raising_fetch)
+    monkeypatch.setattr(dev_svc.github, "list_recent_prs", raising_fetch)
+
+    t1 = run(dev_svc.run_scan(session, user_a, DummyCreds()))
+    assert t1["drafts_created"] == 1
+    assert t1["matching_skipped"] is True and t1["linked"] == 0
+
+    drafts, _ = dev_svc.list_drafts(session, user_a.id)
+    assert len(drafts) == 1 and drafts[0].related_issues is None  # retried next scan
+
+    t2 = run(dev_svc.run_scan(session, user_a, DummyCreds()))
+    assert t2["new_entries"] == 0  # cursor advanced despite the failed match phase
+
+
+def test_scan_tally_reports_linked_and_converted(monkeypatch, session, user_a):
+    """The happy-path tail end-to-end through `run_scan`: the backlog draft gets
+    linked, and the tally carries the new counts."""
+    _seed_config(session, user_a, sources=["d1"], repos=_REPOS, docs_forest=_FOREST)
+    _patch_docs(
+        monkeypatch, {"DOC1": _doc(("x", "6-July-2026, 8:41 PM IST", None, "b"))}
+    )
+    _patch_synth(monkeypatch, SynthesisResult(issues=[]), [])
+    _make_draft(session, user_a)  # a lingering backlog draft, NULL related_issues
+    _patch_candidates(monkeypatch)
+    _patch_matcher(monkeypatch, _matches((0, [(12, "issue", "medium")])))
+
+    tally = run(dev_svc.run_scan(session, user_a, DummyCreds()))
+    assert tally["linked"] == 1 and tally["converted"] == 0
+    assert tally["matching_skipped"] is False
+
+
+# ── Goal 12b: repo change + comment re-target guard ───────────────────────────
+
+
+def test_repo_change_clears_stale_matches(session, user_a):
+    draft = _make_draft(session, user_a, related_issues='[{"number": 12}]')
+    out = dev_svc.update_draft(session, user_a.id, draft.id, repo="org/kaapi-web")
+    assert out.related_issues is None  # stale — re-matched on the next scan
+    # A body-only edit leaves the matches alone.
+    draft2 = _make_draft(session, user_a, related_issues="[]")
+    out2 = dev_svc.update_draft(session, user_a.id, draft2.id, body="edited")
+    assert out2.related_issues == "[]"
+
+
+def test_comment_draft_cannot_be_retargeted(session, user_a):
+    from app.errors import ApiError
+
+    draft = _make_draft(
+        session,
+        user_a,
+        kind=KIND_COMMENT,
+        target_issue_number=12,
+        target_issue_url="https://github.com/org/kaapi-backend/issues/12",
+    )
+    with pytest.raises(ApiError):
+        dev_svc.update_draft(session, user_a.id, draft.id, repo="org/kaapi-web")
+    # Same-repo (no-op) and body edits stay allowed — the card body is editable.
+    out = dev_svc.update_draft(
+        session, user_a.id, draft.id, repo=draft.repo, body="sharper comment"
+    )
+    assert out.body == "sharper comment" and out.kind == KIND_COMMENT
+
+
+# ── Goal 12b: filing a comment draft (the third write) ────────────────────────
+
+
+def _make_comment_draft(session, user, **over) -> DevIssueDraft:
+    return _make_draft(
+        session,
+        user,
+        kind=KIND_COMMENT,
+        target_issue_number=over.pop("target_issue_number", 12),
+        target_issue_url="https://github.com/org/kaapi-backend/issues/12",
+        project_node_id=None,
+        project_title=None,
+        body=over.pop("body", "New repro detail."),
+        **over,
+    )
+
+
+def test_filing_a_comment_draft_posts_exactly_one_comment(monkeypatch, session, user_a):
+    """kind=comment files as ONE comments-endpoint call — zero create_issue, zero
+    project attach — and stores the comment URL against the existing columns."""
+    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    draft = _make_comment_draft(session, user_a)
+
+    def explode(*a, **k):
+        raise AssertionError(
+            "a comment draft must never create an issue or attach a project"
+        )
+
+    monkeypatch.setattr(dev_svc.github, "create_issue", explode)
+    monkeypatch.setattr(dev_svc.github, "add_issue_to_project", explode)
+
+    posted: list = []
+
+    async def fake_comment(pat, owner, repo, number, body):
+        posted.append((owner, repo, number, body))
+        return {"url": "https://github.com/org/kaapi-backend/issues/12#issuecomment-9"}
+
+    monkeypatch.setattr(dev_svc.github, "create_issue_comment", fake_comment)
+
+    out = run(dev_svc.file_draft(session, user_a.id, draft.id))
+    assert posted == [("org", "kaapi-backend", 12, "New repro detail.")]
+    assert out.status == FILED
+    assert out.issue_url.endswith("#issuecomment-9")  # the COMMENT's url
+    assert out.issue_number == 12
+
+    # A re-click never double-posts (the already-posted guard).
+    run(dev_svc.file_draft(session, user_a.id, draft.id))
+    assert len(posted) == 1
+
+
+def test_comment_filing_failure_leaves_the_draft_for_retry(
+    monkeypatch, session, user_a
+):
+    from app.errors import ApiError
+
+    dev_svc.add_token(session, user_a.id, "github_pat_X", ["org"], "octocat")
+    draft = _make_comment_draft(session, user_a)
+
+    async def failing_comment(pat, owner, repo, number, body):
+        raise gh.GithubError(502, "comment failed")
+
+    monkeypatch.setattr(dev_svc.github, "create_issue_comment", failing_comment)
+    with pytest.raises(ApiError):
+        run(dev_svc.file_draft(session, user_a.id, draft.id))
+    session.refresh(draft)
+    assert draft.status == DRAFT and draft.issue_url is None  # untouched, retryable
+
+
+def test_comment_file_endpoint_gated_and_scoped(
+    monkeypatch, auth, session, user_a, user_b
+):
+    draft = _make_comment_draft(session, user_a)
+    # No dev flag → 403 before anything else.
+    assert auth.as_user(user_a).post(f"/dev/{draft.id}/file").status_code == 403
+    _enable_dev(session, user_a)
+    _enable_dev(session, user_b)
+    # A second user cannot reach the first user's draft by id.
+    assert auth.as_user(user_b).post(f"/dev/{draft.id}/file").status_code == 404
+
+
+# ── Goal 12b: @-mention members endpoint ──────────────────────────────────────
+
+
+def test_members_endpoint_routes_token_and_degrades_to_empty(
+    monkeypatch, auth, session, user_a
+):
+    client = auth.as_user(user_a)
+    assert client.get("/dev/config/members?repo=org/kaapi-backend").status_code == 403
+
+    _enable_dev(session, user_a)
+    assert client.get("/dev/config/members?repo=notarepo").status_code == 400
+
+    # No token stored for the owner → empty list, not an error.
+    r = client.get("/dev/config/members?repo=org/kaapi-backend")
+    assert r.status_code == 200 and r.json()["members"] == []
+
+    dev_svc.add_token(session, user_a.id, "PAT_PERSONAL", ["alice"], "alice")
+    dev_svc.add_token(session, user_a.id, "PAT_ORG", ["org"], "alice")
+    used: dict = {}
+
+    async def fake_assignees(pat, owner, repo):
+        used["pat"] = pat
+        return [{"login": "teammate", "name": "Team Mate"}]
+
+    monkeypatch.setattr("app.routers.dev.github.list_assignees", fake_assignees)
+    r = client.get("/dev/config/members?repo=org/kaapi-backend")
+    assert r.json()["members"] == [{"login": "teammate", "name": "Team Mate"}]
+    assert used["pat"] == "PAT_ORG"  # routed by the repo's owner
+
+    async def forbidden(pat, owner, repo):
+        raise gh.GithubError(403, "resource not accessible")
+
+    monkeypatch.setattr("app.routers.dev.github.list_assignees", forbidden)
+    r = client.get("/dev/config/members?repo=org/kaapi-backend")
+    assert (
+        r.status_code == 200 and r.json()["members"] == []
+    )  # typeahead offers nothing
+
+
+def test_draft_serializer_carries_kind_target_and_matches(auth, session, user_a):
+    _enable_dev(session, user_a)
+    _make_comment_draft(
+        session,
+        user_a,
+        related_issues='[{"number": 12, "type": "issue", "state": "open", "url": "u", "title": "t", "confidence": "high", "reason": "r"}]',
+    )
+    client = auth.as_user(user_a)
+    d = client.get("/dev/drafts?status=review").json()["items"][0]
+    assert d["kind"] == "comment"
+    assert d["target_issue_number"] == 12 and d["target_issue_url"]
+    assert d["related_issues"][0]["number"] == 12
+    # An unmatched draft reports null (not yet matched), not [].
+    _make_draft(session, user_a, title="unmatched")
+    items = client.get("/dev/drafts?status=review").json()["items"]
+    fresh = next(i for i in items if i["title"] == "unmatched")
+    assert fresh["related_issues"] is None

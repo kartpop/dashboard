@@ -16,9 +16,11 @@ import {
   setLoading as setTabLoading,
   tabForStatus,
 } from "./draftTabs";
+import type { Member } from "./mentions";
 import type { ScanTally } from "./scanTally";
 
 export type { DevDraft, DraftSource, TabKey } from "./draftTabs";
+export type { Member } from "./mentions";
 
 /** `GET /dev` — view metadata only (goal 12a); the drafts come from `/dev/drafts`. */
 interface DevMeta {
@@ -357,6 +359,22 @@ export function useDevConfig() {
     return data.projects;
   }, []);
 
+  // The @-mention typeahead's member list (goal 12b) — fetched lazily the first time
+  // a card's editor needs it, then cached per repo for the session. A failure caches
+  // an empty list: the typeahead offers nothing, typing `@login` by hand still works.
+  const membersCache = useRef<Map<string, Promise<Member[]>>>(new Map());
+  const listMembers = useCallback((repo: string): Promise<Member[]> => {
+    const cached = membersCache.current.get(repo);
+    if (cached) return cached;
+    const fetched = apiGet<{ members: Member[] }>(
+      `/dev/config/members?repo=${encodeURIComponent(repo)}`,
+    )
+      .then((data) => data.members)
+      .catch(() => [] as Member[]);
+    membersCache.current.set(repo, fetched);
+    return fetched;
+  }, []);
+
   return {
     config,
     error,
@@ -369,5 +387,6 @@ export function useDevConfig() {
     saveProjects,
     refreshRepos,
     listProjects,
+    listMembers,
   };
 }

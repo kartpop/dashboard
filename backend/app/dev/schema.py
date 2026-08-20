@@ -52,3 +52,63 @@ class SynthesisResult(BaseModel):
         "actionable work contributes to no issue; a topic mentioned repeatedly across "
         "the day yields exactly one issue citing all its mentions.",
     )
+
+
+# ── Goal 12b: the matcher (drafts vs live GitHub candidates) ──────────────────
+#
+# Same posture as SynthesisResult: the matcher only PROPOSES (number, type, confidence)
+# tuples; code validates every one against the fetched candidate set and takes the
+# stored url/title/state from that list, never from the model.
+
+
+class ProposedMatch(BaseModel):
+    """One candidate the model believes covers (part of) a draft."""
+
+    number: int = Field(
+        description="The candidate's number, exactly as given in the input."
+    )
+    type: str = Field(
+        description="'issue' or 'pr' — which candidate list the number came from."
+    )
+    confidence: str = Field(
+        description="'high' only when the candidate clearly covers the same underlying "
+        "work as the draft; 'medium' for a probable-but-unsure relation."
+    )
+    reason: str = Field(
+        description="One short sentence: why this candidate matches the draft."
+    )
+
+
+class DraftMatches(BaseModel):
+    draft_index: int = Field(
+        description="The draft's index exactly as given in the input."
+    )
+    matches: list[ProposedMatch] = Field(
+        default_factory=list,
+        description="Every existing issue/PR that probably covers this draft's work, "
+        "best match first. Empty when nothing plausibly matches — do NOT force one.",
+    )
+
+
+class MatchResult(BaseModel):
+    drafts: list[DraftMatches] = Field(
+        default_factory=list,
+        description="One entry per input draft (a draft with no matches may be "
+        "omitted or carry an empty matches list).",
+    )
+
+
+class CommentDraftResult(BaseModel):
+    """The comment drafter's verdict on one draft vs its matched issue's thread."""
+
+    has_new_info: bool = Field(
+        description="True only if the draft carries information the existing issue "
+        "thread lacks (a new reproduction, a fresh occurrence, an extra constraint). "
+        "False when the thread already covers everything the draft says."
+    )
+    comment_markdown: str | None = Field(
+        default=None,
+        description="When has_new_info: the comment to post, GitHub-flavored markdown "
+        "— ONLY the genuinely new information, written to read naturally in the "
+        "existing thread. Null when has_new_info is false.",
+    )

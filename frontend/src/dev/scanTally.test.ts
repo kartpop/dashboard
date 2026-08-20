@@ -50,6 +50,31 @@ describe("formatScanTally", () => {
     expect(line).toContain("Config");
   });
 
+  it("reports links and conversions after the counts (goal 12b)", () => {
+    expect(formatScanTally(tally({ linked: 2, converted: 1 }))).toBe(
+      "2 docs read · 2 new entries · 1 draft (2 linked to existing issues or PRs, 1 converted to a comment)",
+    );
+    expect(formatScanTally(tally({ linked: 1 }))).toContain(
+      "(1 linked to an existing issue or PR)",
+    );
+  });
+
+  it("reports backlog links even on a scan with no new entries", () => {
+    // The matcher covers the whole unfiled backlog, not just this scan's output.
+    const line = formatScanTally(
+      tally({ new_entries: 0, drafts_created: 0, linked: 3, converted: 2 }),
+    );
+    expect(line).toContain("no new entries");
+    expect(line).toContain("3 linked");
+    expect(line).toContain("2 converted to comments");
+  });
+
+  it("reports a skipped match phase instead of hiding it", () => {
+    const line = formatScanTally(tally({ matching_skipped: true }));
+    expect(line).toContain("match check skipped");
+    expect(line).toContain("retry");
+  });
+
   it("pluralises each count", () => {
     expect(
       formatScanTally(

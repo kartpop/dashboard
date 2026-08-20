@@ -2718,6 +2718,89 @@ h1, h2, h3 {
   border-radius: 999px;
 }
 
+/* Comment-card target badge (goal 12b) — the fixed destination, linking out. */
+.dev-comment-target {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-h);
+  background: color-mix(in srgb, #3b82f6 10%, var(--bg));
+  border: 1px solid color-mix(in srgb, #3b82f6 40%, var(--border));
+  border-radius: 999px;
+  padding: 2px 10px;
+  margin-bottom: 6px;
+  text-decoration: none;
+}
+
+/* The Similar line (goal 12b) — validated matches as real anchors, pre-file. */
+.dev-card-similar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--done);
+}
+
+.dev-similar-label {
+  font-weight: 600;
+}
+
+.dev-card-similar a {
+  color: var(--text-h);
+}
+
+.dev-nothing-new {
+  font-style: italic;
+}
+
+/* @-mention typeahead (goal 12b) — a small dropdown under the body editor. */
+.dev-mention-wrap {
+  position: relative;
+}
+
+.dev-mention-menu {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  z-index: 20;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  max-height: 180px;
+  overflow-y: auto;
+  min-width: 200px;
+}
+
+.dev-mention-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.dev-mention-item--active,
+.dev-mention-item:hover {
+  background: var(--muted-bg);
+}
+
+.dev-mention-name {
+  font-size: 11px;
+  color: var(--done);
+}
+
 .dev-card-foot {
   display: flex;
   align-items: center;

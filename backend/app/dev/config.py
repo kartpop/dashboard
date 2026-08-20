@@ -28,6 +28,29 @@ DEV_MAX_TOKENS = int(os.environ.get("DEV_MAX_TOKENS", "32000"))
 # do-not-redraft context (cross-scan dedup). Newest-first truncation.
 DO_NOT_REDRAFT_LIMIT = int(os.environ.get("DEV_DO_NOT_REDRAFT_LIMIT", "60"))
 
+# ── Live-GitHub dedup (goal 12b): the matcher + comment drafter ────────────────
+
+# The issue matcher — one call per repo with unmatched drafts, wide-but-cheap input
+# (candidate titles, not bodies). Sonnet by default: this is per-pair judgment, not
+# cross-conversation synthesis, and the candidate lists are large.
+DEV_MATCH_MODEL = os.environ.get("DEV_MATCH_MODEL", "claude-sonnet-5")
+# Output budget for the matcher. It streams (the g12 `5c6b48e` truncation lesson), so
+# this is only a ceiling — the first post-deploy scan matches the whole lingering
+# backlog in one pass and must not truncate mid-JSON.
+DEV_MATCH_MAX_TOKENS = int(os.environ.get("DEV_MATCH_MAX_TOKENS", "16000"))
+
+# The comment drafter reuses DEV_MODEL (this text faces humans on GitHub) with its own
+# output budget — one call per converted draft, narrow-but-deep input (one issue's
+# whole thread).
+DEV_COMMENT_MAX_TOKENS = int(os.environ.get("DEV_COMMENT_MAX_TOKENS", "8000"))
+
+# Candidate-fetch caps — these (not a token knob) govern the matcher's input size.
+# Open issues per repo, most-recently-updated first. Open state, deliberately NOT a
+# recency window: a six-month-old open issue is exactly the duplicate that matters.
+DEV_ISSUE_FETCH_CAP = int(os.environ.get("DEV_ISSUE_FETCH_CAP", "200"))
+# Open + merged PRs per repo (closed-unmerged are skipped as abandoned).
+DEV_PR_FETCH_CAP = int(os.environ.get("DEV_PR_FETCH_CAP", "100"))
+
 # GitHub API endpoints. Overridable for a self-hosted GitHub Enterprise host.
 GITHUB_API_BASE = os.environ.get("GITHUB_API_BASE", "https://api.github.com")
 GITHUB_GRAPHQL_URL = os.environ.get(

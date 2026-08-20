@@ -55,12 +55,25 @@ def _draft_out(draft: DevIssueDraft) -> dict:
         sources = json.loads(draft.sources or "[]")
     except json.JSONDecodeError:
         sources = []
+    # related_issues is nullable by design: null = not yet matched, [] = matched with
+    # nothing found. The card renders the Similar line from this (validated matches
+    # only — every url/title here came from the fetched candidate list, never the LLM).
+    related = None
+    if draft.related_issues is not None:
+        try:
+            related = json.loads(draft.related_issues)
+        except json.JSONDecodeError:
+            related = None
     return {
         "id": draft.id,
         "title": draft.title,
         "body": draft.body,
         "repo": draft.repo,
         "status": draft.status,
+        "kind": draft.kind,
+        "target_issue_number": draft.target_issue_number,
+        "target_issue_url": draft.target_issue_url,
+        "related_issues": related,
         "sources": [
             {"doc_path": s.get("doc_path"), "entry_ts": s.get("entry_ts")}
             for s in sources
@@ -392,6 +405,31 @@ async def refresh_github(
         raise ApiError(502, "github_unavailable", last_error.message) from last_error
     repos = sorted(by_name.values(), key=lambda r: (r["full_name"] or "").lower())
     return {"repos": repos}
+
+
+@router.get("/config/members")
+async def list_members(
+    repo: str,
+    user: User = Depends(require_dev_enabled),
+    session: Session = Depends(get_session),
+):
+    """The repo's assignable users (`list_assignees`) — the @-mention typeahead's
+    source (goal 12b). Same per-owner token routing as `GET /config/projects`. A PAT
+    that can't list assignees degrades to an EMPTY list, not an error: the typeahead
+    just offers nothing, and typing `@login` by hand still works (it's plain text).
+    Member logins are never fed to any LLM — this list exists for the human's editor
+    only."""
+    if "/" not in repo:
+        raise ApiError(400, "bad_repo", "Repo must be 'owner/name'.")
+    owner, name = repo.split("/", 1)
+    pat = dev_svc.get_pat_for_owner(session, user.id, owner)
+    if not pat:
+        return {"members": []}
+    try:
+        members = await github.list_assignees(pat, owner, name)
+    except github.GithubError:
+        members = []
+    return {"members": members}
 
 
 @router.get("/config/projects")

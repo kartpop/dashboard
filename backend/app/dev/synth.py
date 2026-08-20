@@ -24,7 +24,7 @@ import logging
 import anthropic
 
 from app.dev import config
-from app.dev.schema import SynthesisResult
+from app.dev.schema import CommentDraftResult, MatchResult, SynthesisResult
 
 _log = logging.getLogger("dev.synth")
 
@@ -150,4 +150,200 @@ async def synthesise(
             "raise DEV_MAX_TOKENS, currently %d)",
             config.DEV_MAX_TOKENS,
         )
+        return None
+
+
+# ── Goal 12b: the matcher (LLM call 2) ────────────────────────────────────────
+#
+# One call per repo that has unmatched drafts: that repo's drafts (title + body) vs its
+# typed candidate lists. Wide but cheap — MANY candidates, titles/excerpts only, no
+# bodies. The pinned field sets below are the whole matcher contract: no doc ids, no
+# tokens, no candidate URLs (code re-derives url/title/state from the fetched list by
+# validated number — ids/URLs that code acts on never come from the model).
+
+DRAFT_MATCH_FIELDS = ("draft_index", "title", "body")
+ISSUE_CANDIDATE_FIELDS = ("number", "title", "labels")
+PR_CANDIDATE_FIELDS = ("number", "title", "state", "description_excerpt")
+
+_MATCH_SYSTEM = """You are a de-duplication judge for GitHub issue drafts. You are \
+given DRAFTS (proposed new issues for one repository) and two CANDIDATE lists from \
+that same repository: its OPEN ISSUES and its recent OPEN/MERGED PULL REQUESTS. You \
+have no other GitHub access and take no action.
+
+For each draft, decide which candidates (if any) already cover the same underlying \
+work:
+- An open issue describing the same bug/feature is a match even if worded differently.
+- A PR (open or merged) whose title/description says it implements or fixes the \
+draft's work is a match.
+- Confidence 'high' means you would stake the call on it: same underlying work, not \
+merely the same area. 'medium' means probably related. Omit anything weaker — most \
+drafts match NOTHING, and an empty matches list is the expected common answer.
+
+Return each match's number and type exactly as given in the input. Output ONLY the \
+structured result."""
+
+
+def build_match_payload(
+    drafts: list[dict], issue_candidates: list[dict], pr_candidates: list[dict]
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Serialize matcher inputs to EXACTLY the pinned field sets — nothing else.
+
+    Drafts carry a positional `draft_index` (assigned here) — never the DB id. Rows may
+    carry extra keys (html_url, updated_at from the fetch); only the pinned fields are
+    serialized, so no URL or timestamp reaches the prompt."""
+    d_out = [
+        {"draft_index": i, "title": d.get("title"), "body": d.get("body")}
+        for i, d in enumerate(drafts)
+    ]
+    i_out = [{k: c.get(k) for k in ISSUE_CANDIDATE_FIELDS} for c in issue_candidates]
+    p_out = [{k: c.get(k) for k in PR_CANDIDATE_FIELDS} for c in pr_candidates]
+    return d_out, i_out, p_out
+
+
+def build_match_prompt(
+    drafts: list[dict], issue_candidates: list[dict], pr_candidates: list[dict]
+) -> tuple[str, str]:
+    """Build (system, user) for one repo's match call. Pure — no I/O. Inputs are
+    exactly `build_match_payload`'s output."""
+    user = (
+        "OPEN ISSUES (candidates; match by number, type 'issue'):\n"
+        f"{json.dumps(issue_candidates, ensure_ascii=False)}\n\n"
+        "OPEN/MERGED PULL REQUESTS (candidates; match by number, type 'pr'):\n"
+        f"{json.dumps(pr_candidates, ensure_ascii=False)}\n\n"
+        "DRAFTS (judge each against the candidates above):\n"
+        f"{json.dumps(drafts, ensure_ascii=False)}"
+    )
+    return _MATCH_SYSTEM, user
+
+
+async def match_issues(
+    drafts: list[dict], issue_candidates: list[dict], pr_candidates: list[dict]
+) -> MatchResult | None:
+    """Judge one repo's unmatched drafts against its fetched candidates.
+
+    Never raises. Returns a `MatchResult` on success (empty matches are a real answer)
+    and `None` on failure (errored or truncated at max_tokens) — the caller then leaves
+    those drafts' `related_issues` NULL so the next scan retries. Streams like the
+    synthesiser: the first post-deploy scan matches a 50+ draft backlog in one pass and
+    a non-streaming call would truncate (the `5c6b48e` lesson)."""
+    if not drafts:
+        return MatchResult(drafts=[])
+    try:
+        client = anthropic.AsyncAnthropic()
+        system, user = build_match_prompt(
+            *build_match_payload(drafts, issue_candidates, pr_candidates)
+        )
+        async with client.messages.stream(
+            model=config.DEV_MATCH_MODEL,
+            max_tokens=config.DEV_MATCH_MAX_TOKENS,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            output_format=MatchResult,
+        ) as stream:
+            message = await stream.get_final_message()
+        if message.stop_reason == "max_tokens":
+            _log.error(
+                "dev matcher truncated at max_tokens=%d — drafts left unmatched for "
+                "the next scan; raise DEV_MATCH_MAX_TOKENS",
+                config.DEV_MATCH_MAX_TOKENS,
+            )
+            return None
+        return message.parsed_output or MatchResult(drafts=[])
+    except Exception:
+        _log.exception(
+            "dev matcher call failed — drafts left unmatched for the next scan"
+        )
+        return None
+
+
+# ── Goal 12b: the comment drafter (LLM call 3) ────────────────────────────────
+#
+# One call per draft whose top ISSUE match is high-confidence: the draft vs that ONE
+# issue's whole thread (narrow but deep) — plus, when a PR also matched high, that PR's
+# title/description/commit subjects as context. Reuses DEV_MODEL: this text faces
+# humans on GitHub.
+
+_COMMENT_SYSTEM = """You are an engineering assistant. A DRAFT issue turned out to \
+duplicate an EXISTING GitHub issue, whose body and comment thread you are given (plus, \
+sometimes, RELATED PULL REQUESTS with their commit subject lines). Decide whether the \
+draft carries information the existing thread does NOT already have — a new \
+reproduction, a fresh occurrence, an extra constraint, a sharper acceptance criterion.
+
+- If it does: set has_new_info true and write comment_markdown — ONLY the genuinely \
+new information, phrased to read naturally as a comment in that thread (GitHub-flavored \
+markdown; you may reference a related PR by number, e.g. "PR #45 appears to cover part \
+of this"). Do not restate what the thread already says; do not summarise the draft.
+- If everything the draft says is already covered: set has_new_info false and \
+comment_markdown null.
+
+You only draft text; a human reviews and files it. Output ONLY the structured result."""
+
+
+def build_comment_prompt(
+    draft: dict, issue_thread: dict, related_prs: list[dict]
+) -> tuple[str, str]:
+    """Build (system, user) for one comment-draft call. Pure — no I/O.
+
+    `draft` is `{title, body}`; `issue_thread` is `{number, title, body, comments:
+    [{author, body, created_at}]}`; `related_prs` is `[{number, title, state,
+    description_excerpt, commit_subjects}]`. Comment authors are GitHub logins already
+    public on the thread — no member directory is ever included."""
+    payload = {
+        "draft": {"title": draft.get("title"), "body": draft.get("body")},
+        "existing_issue": {
+            "number": issue_thread.get("number"),
+            "title": issue_thread.get("title"),
+            "body": issue_thread.get("body"),
+            "comments": [
+                {
+                    "author": c.get("author"),
+                    "body": c.get("body"),
+                    "created_at": c.get("created_at"),
+                }
+                for c in (issue_thread.get("comments") or [])
+            ],
+        },
+        "related_prs": [
+            {
+                "number": p.get("number"),
+                "title": p.get("title"),
+                "state": p.get("state"),
+                "description_excerpt": p.get("description_excerpt"),
+                "commit_subjects": p.get("commit_subjects") or [],
+            }
+            for p in related_prs
+        ],
+    }
+    user = json.dumps(payload, ensure_ascii=False)
+    return _COMMENT_SYSTEM, user
+
+
+async def draft_comment(
+    draft: dict, issue_thread: dict, related_prs: list[dict]
+) -> CommentDraftResult | None:
+    """Draft the add-to-existing-issue comment (or report nothing-new).
+
+    Never raises; `None` on failure — the caller then leaves the draft an issue draft
+    with its links (conversion is best-effort, never blocking)."""
+    try:
+        client = anthropic.AsyncAnthropic()
+        system, user = build_comment_prompt(draft, issue_thread, related_prs)
+        async with client.messages.stream(
+            model=config.DEV_MODEL,
+            max_tokens=config.DEV_COMMENT_MAX_TOKENS,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            output_format=CommentDraftResult,
+        ) as stream:
+            message = await stream.get_final_message()
+        if message.stop_reason == "max_tokens":
+            _log.error(
+                "dev comment drafter truncated at max_tokens=%d — draft left as an "
+                "issue draft; raise DEV_COMMENT_MAX_TOKENS",
+                config.DEV_COMMENT_MAX_TOKENS,
+            )
+            return None
+        return message.parsed_output
+    except Exception:
+        _log.exception("dev comment-draft call failed — draft left as an issue draft")
         return None
