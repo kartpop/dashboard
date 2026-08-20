@@ -652,20 +652,51 @@ async def _match_and_convert(session: Session, user_id: int) -> dict:
         if not pat:
             # No token = this repo is unreadable until one is added (not a transient
             # failure) — exclude it rather than blocking matching forever, but say so.
-            tally["matching_skipped"] = True
-            continue
-        try:
-            fetched_issues = await github.list_open_issues(pat, owner, repo_name)
-            fetched_prs = await github.list_recent_prs(pat, owner, repo_name)
-        except github.GithubError:
             _log.warning(
-                "dev match: candidate fetch failed for %s (user %s) — match phase "
-                "aborted, drafts left unmatched for the next scan",
+                "dev match: no token for owner %r — %s excluded from candidates "
+                "(user %s)",
+                owner,
                 repo_full,
                 user_id,
             )
             tally["matching_skipped"] = True
-            return tally
+            continue
+        # The two fetches fail independently: a repo with issues DISABLED (410 on
+        # /issues; 404 for renamed/out-of-grant) can still carry matchable PRs.
+        # Permanent statuses exclude just that list (retrying can't fix them); anything
+        # else is transient and aborts the whole phase so no draft settles
+        # matched-empty while its true match's repo was unreachable.
+        fetched_issues: list[dict] = []
+        fetched_prs: list[dict] = []
+        for label, fetch, sink in (
+            ("issues", github.list_open_issues, fetched_issues),
+            ("PRs", github.list_recent_prs, fetched_prs),
+        ):
+            try:
+                sink.extend(await fetch(pat, owner, repo_name))
+            except github.GithubError as exc:
+                tally["matching_skipped"] = True
+                if exc.status in (404, 410):
+                    _log.warning(
+                        "dev match: %s of %s unreadable (HTTP %s: %s) — that list "
+                        "contributes no candidates (user %s)",
+                        label,
+                        repo_full,
+                        exc.status,
+                        exc.message,
+                        user_id,
+                    )
+                    continue
+                _log.warning(
+                    "dev match: %s fetch failed for %s (HTTP %s: %s) — match phase "
+                    "aborted, drafts left unmatched for the next scan (user %s)",
+                    label,
+                    repo_full,
+                    exc.status,
+                    exc.message,
+                    user_id,
+                )
+                return tally
         # Tag every candidate with its repo — numbers are only unique per repo, and
         # the (repo, number) pair is the validation key.
         issue_cands.extend({**c, "repo": repo_full} for c in fetched_issues)

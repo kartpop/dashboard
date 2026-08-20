@@ -1732,3 +1732,59 @@ def test_cross_repo_conversion_retags_the_draft(monkeypatch, session, user_a):
     assert draft.repo == "org/kaapi-backend"  # re-tagged: comment lives with the issue
     assert draft.target_issue_number == 12
     assert draft.target_issue_url == _ISSUE_CANDS[0]["html_url"]
+
+
+def test_issues_disabled_repo_is_excluded_but_matching_proceeds(
+    monkeypatch, session, user_a
+):
+    """410 on /issues (issues disabled) or 404 (renamed / out of the PAT's grant) is
+    PERMANENT — retrying can't fix it, so that list is excluded (reported via
+    matching_skipped) and matching still runs for everything else."""
+    _seed_matching(session, user_a)
+    draft = _make_draft(session, user_a)
+
+    async def issues_or_410(pat, owner, name):
+        if f"{owner}/{name}" == "org/kaapi-backend":
+            return _ISSUE_CANDS
+        raise gh.GithubError(410, "Issues are disabled for this repo")
+
+    async def prs_empty(pat, owner, name):
+        return _PR_CANDS if f"{owner}/{name}" == "org/kaapi-backend" else []
+
+    monkeypatch.setattr(dev_svc.github, "list_open_issues", issues_or_410)
+    monkeypatch.setattr(dev_svc.github, "list_recent_prs", prs_empty)
+    _patch_matcher(monkeypatch, _matches((0, [(12, "issue", "medium")])))
+
+    tally = run(dev_svc._match_and_convert(session, user_a.id))
+    assert tally["linked"] == 1  # matching ran despite the disabled-issues repo
+    assert tally["matching_skipped"] is True  # …and the exclusion is reported
+    session.refresh(draft)
+    assert draft.related_issues is not None
+
+
+def test_transient_fetch_failure_aborts_the_whole_match_phase(
+    monkeypatch, session, user_a
+):
+    """A 5xx/network failure is transient: the phase aborts so NO draft settles
+    matched-empty while its true match's repo was unreachable — everything stays NULL
+    and retries next scan."""
+    _seed_matching(session, user_a)
+    draft = _make_draft(session, user_a)
+    _patch_candidates(monkeypatch)  # kaapi-backend fetch succeeds…
+
+    async def prs_boom(pat, owner, name):
+        if f"{owner}/{name}" == "org/kaapi-web":
+            raise gh.GithubError(502, "bad gateway")  # …then kaapi-web dies
+        return _PR_CANDS
+
+    monkeypatch.setattr(dev_svc.github, "list_recent_prs", prs_boom)
+
+    def no_matcher(*a, **k):
+        raise AssertionError("the matcher must not run after an aborted fetch")
+
+    monkeypatch.setattr(dev_svc.synth, "match_issues", no_matcher)
+
+    tally = run(dev_svc._match_and_convert(session, user_a.id))
+    assert tally == {"linked": 0, "converted": 0, "matching_skipped": True}
+    session.refresh(draft)
+    assert draft.related_issues is None  # still queued — retried next scan

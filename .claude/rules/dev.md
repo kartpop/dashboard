@@ -41,9 +41,11 @@ recorded in `docs/goals/goal-12b.md`).
   `_dispose_synthesis`, **catalog-wide (12b.1)** — candidates come from EVERY
   configured repo, each tagged with its `repo`, because the draft's own repo tag is
   the synthesiser's guess and is sometimes wrong (prod mis-tags matched nothing under
-  per-repo scoping). The candidate fetch is all-or-nothing per scan (one repo's
-  transient failure aborts the phase so a true match is never silently missed; a
-  missing PAT only excludes that repo). Drafts are **chunked
+  per-repo scoping). Candidate-fetch failures split by permanence: a TRANSIENT error
+  (5xx, rate limit, network) aborts the whole phase so a true match is never silently
+  missed, while a PERMANENT one — 410 issues-disabled, 404 renamed/out-of-grant, or a
+  missing PAT — excludes just that list/repo and matching proceeds (both reported via
+  `matching_skipped`). Drafts are **chunked
   `DEV_MATCH_DRAFT_CHUNK` (20) per call** (candidates repeated, matches merged
   code-side) — the first prod backlog put 78 drafts in one call and truncated at 16k
   output, matching nothing; a failed chunk skips only itself. Its payload is EXACTLY the pinned field sets — drafts as

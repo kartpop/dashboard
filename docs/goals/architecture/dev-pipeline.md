@@ -227,9 +227,11 @@ re-targeting doesn't invalidate them).
 **Candidate fetch (code):** for EVERY repo in the catalog — not just the repos drafts
 are tagged with, because the tag is the synthesiser's guess and is sometimes wrong
 (12b.1: prod mis-tags matched nothing under per-repo scoping). Each candidate is tagged
-with its `repo`; the fetch is all-or-nothing per scan (one repo's transient failure
-aborts the phase so a true match is never silently missed; a repo whose owner has no
-stored token is excluded and reported). Per repo, using the owner-routed PAT:
+with its `repo`. Fetch failures split by permanence: a transient error (5xx, rate limit,
+network) aborts the phase so a true match is never silently missed, while a permanent one
+— 410 issues-disabled, 404 renamed/out-of-grant, or a missing PAT — excludes just that
+list/repo and matching proceeds; both are reported in the tally. Per repo, using the
+owner-routed PAT:
 
 - `list_open_issues` — `GET /repos/{o}/{r}/issues?state=open&sort=updated`, capped at
   `DEV_ISSUE_FETCH_CAP` (200) most-recently-updated. Open state deliberately, **not** a
@@ -412,7 +414,8 @@ selectively rather than reading them whole.
 |---|---|---|
 | A source Doc fails to read | That Doc is skipped; others proceed; its cursor untouched | Nothing — next scan retries |
 | Synthesis errors or truncates | `None` → **no drafts stored, no cursor advanced**; tally says `synthesis failed … will re-scan` | Nothing (or raise `DEV_MAX_TOKENS` if it keeps truncating) |
-| GitHub candidate fetch fails | That repo's match phase skipped; drafts persist with NULL matches; tally says `match check skipped` | Nothing — next scan retries the NULL drafts |
+| Candidate fetch fails transiently (5xx / network) | Whole match phase aborts; drafts persist with NULL matches; tally says `match check skipped` | Nothing — next scan retries the NULL drafts |
+| A repo is permanently unreadable (410 issues disabled, 404 renamed / outside the PAT's grant, no PAT for its owner) | That list/repo excluded from candidates; matching proceeds; tally still says `match check skipped` | Fix the catalog/PAT if unintended; a disabled-issues repo is fine to leave |
 | Matcher errors or truncates | That **chunk** of drafts skipped (stays NULL, retried next scan); other chunks proceed | Nothing (persistent truncation: raise `DEV_MATCH_MAX_TOKENS` or lower `DEV_MATCH_DRAFT_CHUNK`) |
 | Thread fetch / drafter fails | Draft stays a linked issue draft (no conversion) | Nothing |
 | Issue filing: create OK, project-attach fails | `filed` with "attach pending"; retry re-runs only the attach | Click retry on the card |
