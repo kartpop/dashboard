@@ -2577,12 +2577,24 @@ h1, h2, h3 {
   gap: 12px;
 }
 
-/* Tab bar (goal 12a) — four lanes, each with a count badge. */
+/* Tab bar (goal 12a) — four lanes, each with a count badge. Frozen to the top of the
+   scroll port (`.app-main`) since 12a.1: the review lane runs to seventy cards, and the
+   count of what's left is the one thing worth keeping in sight the whole way down. Only
+   the counts pin — the title and Config/Create now scroll away, so the bar costs the
+   lane a single row. Negative gutters let the opaque background span the view's full
+   width (cards pass UNDER the bar, never through it) while the inner padding keeps the
+   tabs aligned with the cards. z-index clears the @-mention menu (20), the only
+   positioned thing inside a card. */
 .dev-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 30;
   display: flex;
   gap: 4px;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 16px;
+  margin: 0 -24px 16px;
+  padding: 6px 24px 0;
+  background: var(--bg);
 }
 
 .dev-tab {
