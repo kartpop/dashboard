@@ -31,6 +31,7 @@ from app.dev.models import (
     DISMISSED,
     DRAFT,
     FILED,
+    KIND_COMMENT,
     SAVED,
     DevConfig,
     DevDocCursor,
@@ -502,6 +503,17 @@ async def run_scan(session: Session, user: "User", creds: "Credentials") -> dict
         for doc_id, entries in per_doc.items():
             _advance_cursor(session, user.id, doc_id, entries)
 
+    # Match-and-convert tail (goal 12b): dedup the whole unfiled backlog — this scan's
+    # newborns plus anything lingering in review/saved — against live GitHub. Strictly
+    # best-effort: any failure leaves plain issue drafts (related_issues NULL retries
+    # next scan) and never blocks the scan or the cursor, which advanced above.
+    match_tally = {"linked": 0, "converted": 0, "matching_skipped": False}
+    try:
+        match_tally = await _match_and_convert(session, user.id)
+    except Exception:
+        _log.exception("dev scan: match phase failed for user %s", user.id)
+        match_tally["matching_skipped"] = True
+
     cfg.last_scan_at = _now()
     session.add(cfg)
     session.commit()
@@ -514,7 +526,252 @@ async def run_scan(session: Session, user: "User", creds: "Credentials") -> dict
         # the batch is still queued" — both leave drafts_created at 0, but only one of
         # them means the entries were actually considered. The UI says which.
         "synthesis_failed": synth_failed,
+        # Goal 12b: drafts newly linked to existing GitHub issues/PRs, drafts converted
+        # into comment drafts, and whether any repo's match phase was skipped (reported,
+        # not hidden — a skip means related_issues stays NULL and retries next scan).
+        "linked": match_tally["linked"],
+        "converted": match_tally["converted"],
+        "matching_skipped": match_tally["matching_skipped"],
     }
+
+
+# ── Live-GitHub dedup (goal 12b): match, link, convert ────────────────────────
+
+
+def _unmatched_drafts_by_repo(
+    session: Session, user_id: int
+) -> dict[str, list[DevIssueDraft]]:
+    """The matcher's scope: every NON-SETTLED draft (review + saved) whose
+    `related_issues` is still NULL — regardless of which scan synthesised it, so the
+    first post-deploy scan processes the whole lingering backlog. Dismissed and filed
+    drafts are never matched; an already-matched draft (even "[]") is never re-matched
+    (the NULL-guard). Grouped by repo — the matcher runs one call per repo."""
+    rows = session.exec(
+        select(DevIssueDraft)
+        .where(DevIssueDraft.user_id == user_id)
+        .where(DevIssueDraft.status.in_((DRAFT, SAVED)))
+        .where(DevIssueDraft.related_issues.is_(None))
+        .order_by(DevIssueDraft.id)
+    ).all()
+    by_repo: dict[str, list[DevIssueDraft]] = {}
+    for d in rows:
+        if "/" in (d.repo or ""):
+            by_repo.setdefault(d.repo, []).append(d)
+    return by_repo
+
+
+def _related_line(matches: list[dict], *, exclude_number: int | None = None) -> str:
+    """The deterministic `**Related:** #123, PR #45 (merged)` body line, built from
+    VALIDATED matches only (code, not LLM). GitHub auto-links the `#N` references once
+    filed. `exclude_number` drops a comment draft's own target issue (a `Related: #N`
+    inside a comment on #N would be noise). Empty string when nothing remains."""
+    parts: list[str] = []
+    for m in matches:
+        if m["type"] == "pr":
+            parts.append(f"PR #{m['number']} ({m['state']})")
+        elif m["number"] != exclude_number:
+            parts.append(f"#{m['number']}")
+    return "**Related:** " + ", ".join(parts) if parts else ""
+
+
+def _validated_matches(
+    proposed, issue_by_num: dict[int, dict], pr_by_num: dict[int, dict]
+) -> list[dict]:
+    """Dispose the matcher's proposal for one draft: every returned `(number, type)` is
+    checked against the fetched candidate set — out-of-set entries are dropped — and the
+    stored url/title/type/state come from the code-fetched candidate keyed by validated
+    number, NEVER from LLM output (house rule: ids/URLs code acts on never come from
+    the model). Only the confidence label and the one-line reason are the model's."""
+    out: list[dict] = []
+    for m in proposed:
+        if m.type == "issue" and m.number in issue_by_num:
+            cand, state = issue_by_num[m.number], "open"
+        elif m.type == "pr" and m.number in pr_by_num:
+            cand = pr_by_num[m.number]
+            state = cand["state"]
+        else:
+            continue  # out-of-set (or mistyped) — dropped
+        out.append(
+            {
+                "number": cand["number"],
+                "type": m.type,
+                "state": state,
+                "url": cand["html_url"],
+                "title": cand["title"],
+                "confidence": m.confidence
+                if m.confidence in ("high", "medium")
+                else "medium",
+                "reason": (m.reason or "")[:300],
+            }
+        )
+    return out
+
+
+async def _match_and_convert(session: Session, user_id: int) -> dict:
+    """The post-dispose dedup pass: per repo with unmatched drafts, fetch candidates
+    (code), judge matches (LLM), store validated links + the `Related:` body line
+    (code), and convert confirmed-duplicate drafts into comment drafts. Every step is
+    best-effort per repo: a GitHub read failure or matcher failure skips THAT repo
+    (related_issues stays NULL → retried next scan) and is reported in the tally."""
+    tally = {"linked": 0, "converted": 0, "matching_skipped": False}
+    for repo_full, drafts in _unmatched_drafts_by_repo(session, user_id).items():
+        owner, repo_name = repo_full.split("/", 1)
+        pat = get_pat_for_owner(session, user_id, owner)
+        if not pat:
+            tally["matching_skipped"] = True
+            continue
+        try:
+            issue_cands = await github.list_open_issues(pat, owner, repo_name)
+            pr_cands = await github.list_recent_prs(pat, owner, repo_name)
+        except github.GithubError:
+            _log.warning(
+                "dev match: candidate fetch failed for %s (user %s) — repo skipped",
+                repo_full,
+                user_id,
+            )
+            tally["matching_skipped"] = True
+            continue
+
+        if not issue_cands and not pr_cands:
+            # Nothing to match against — settle the NULL-guard without an LLM call.
+            for draft in drafts:
+                draft.related_issues = "[]"
+                draft.updated_at = _now()
+                session.add(draft)
+            session.commit()
+            continue
+
+        result = await synth.match_issues(
+            [{"title": d.title, "body": d.body} for d in drafts],
+            issue_cands,
+            pr_cands,
+        )
+        if result is None:
+            tally["matching_skipped"] = True
+            continue
+
+        matches_by_index = {dm.draft_index: dm.matches for dm in result.drafts}
+        issue_by_num = {c["number"]: c for c in issue_cands}
+        pr_by_num = {c["number"]: c for c in pr_cands}
+        for i, draft in enumerate(drafts):
+            validated = _validated_matches(
+                matches_by_index.get(i, []), issue_by_num, pr_by_num
+            )
+            draft.related_issues = json.dumps(validated)  # "[]" = matched, none found
+            if validated:
+                tally["linked"] += 1
+                line = _related_line(validated)
+                if line:
+                    draft.body = (draft.body or "").rstrip() + "\n\n" + line
+            draft.updated_at = _now()
+            session.add(draft)
+            session.commit()
+
+            # Convert only on a high-confidence ISSUE match (PRs are never comment
+            # targets — a PR-only match stays a linked issue draft).
+            top_issue = next((v for v in validated if v["type"] == "issue"), None)
+            if top_issue and top_issue["confidence"] == "high":
+                if await _convert_to_comment(
+                    session,
+                    draft,
+                    pat,
+                    owner,
+                    repo_name,
+                    top_issue,
+                    validated,
+                    pr_by_num,
+                ):
+                    tally["converted"] += 1
+    return tally
+
+
+async def _convert_to_comment(
+    session: Session,
+    draft: DevIssueDraft,
+    pat: str,
+    owner: str,
+    repo_name: str,
+    top_issue: dict,
+    validated: list[dict],
+    pr_by_num: dict[int, dict],
+) -> bool:
+    """Fetch the matched issue's thread (plus any high-matched PR's commit subjects),
+    ask the drafter what the draft adds, and mutate accordingly:
+
+    - `has_new_info` → the draft becomes `kind=comment`: target set from the VALIDATED
+      match, body replaced by the comment markdown (explicit owner sign-off — the
+      original body is superseded), project preselect cleared. Title kept for display
+      and the do-not-redraft list.
+    - nothing new → the draft stays `kind=issue`, its top match flagged
+      `nothing_new: true`; the HUMAN dismisses — never auto-dismiss.
+    Returns True only on an actual conversion. Best-effort: any failure leaves the
+    linked issue draft as-is."""
+    try:
+        issue = await github.get_issue(pat, owner, repo_name, top_issue["number"])
+        comments = await github.list_issue_comments(
+            pat, owner, repo_name, top_issue["number"]
+        )
+    except github.GithubError:
+        _log.warning(
+            "dev match: thread fetch for %s/%s#%s failed — draft %s left linked",
+            owner,
+            repo_name,
+            top_issue["number"],
+            draft.id,
+        )
+        return False
+
+    # A high-matched PR contributes title/description/commit subjects as drafter
+    # context (the ONLY point commit subjects are ever fetched — never at candidate
+    # stage). A failed subjects fetch degrades to metadata-only context.
+    related_prs: list[dict] = []
+    for v in validated:
+        if v["type"] == "pr" and v["confidence"] == "high" and v["number"] in pr_by_num:
+            cand = pr_by_num[v["number"]]
+            try:
+                subjects = await github.list_pr_commit_subjects(
+                    pat, owner, repo_name, v["number"]
+                )
+            except github.GithubError:
+                subjects = []
+            related_prs.append({**cand, "commit_subjects": subjects})
+
+    result = await synth.draft_comment(
+        {"title": draft.title, "body": draft.body},
+        {**issue, "comments": comments},
+        related_prs,
+    )
+    if result is None:
+        return False
+
+    if result.has_new_info and (result.comment_markdown or "").strip():
+        draft.kind = KIND_COMMENT
+        draft.target_issue_number = top_issue["number"]
+        draft.target_issue_url = top_issue["url"]
+        body = result.comment_markdown.strip()
+        # The secondary links still land inside the filed comment; the target issue
+        # itself is excluded (a `#N` inside a comment on #N is noise).
+        line = _related_line(validated, exclude_number=top_issue["number"])
+        draft.body = body + ("\n\n" + line if line else "")
+        draft.project_node_id = None
+        draft.project_title = None
+        draft.updated_at = _now()
+        session.add(draft)
+        session.commit()
+        return True
+
+    # Covered by the existing issue with nothing to add: flag it, keep it an issue
+    # draft, and leave the decision to the human ("drafts are cheap, filing is sacred").
+    matches = json.loads(draft.related_issues or "[]")
+    for m in matches:
+        if m.get("type") == "issue" and m.get("number") == top_issue["number"]:
+            m["nothing_new"] = True
+            break
+    draft.related_issues = json.dumps(matches)
+    draft.updated_at = _now()
+    session.add(draft)
+    session.commit()
+    return False
 
 
 # ── Drafts view + edits ───────────────────────────────────────────────────────
@@ -636,8 +893,19 @@ def update_draft(
         draft.title = title.strip()
     if body is not None:
         draft.body = body
-    if repo is not None:
+    if repo is not None and repo.strip() != draft.repo:
+        # A comment draft's target is fixed — re-targeting one means dismissing it
+        # (the UI hides the repo dropdown; this backstops a direct API call).
+        if draft.kind == KIND_COMMENT:
+            raise ApiError(
+                409,
+                "comment_target_fixed",
+                "A comment draft's target is fixed — dismiss it instead.",
+            )
         draft.repo = repo.strip()
+        # Matches were computed against the OLD repo's issues/PRs — stale now. Back to
+        # NULL, so the next scan re-matches against the new repo (no live re-match).
+        draft.related_issues = None
     if project_node_id is not None:
         draft.project_node_id = project_node_id or None
         draft.project_title = (project_title or "").strip() or None
@@ -698,12 +966,20 @@ def _flip_status(session: Session, draft: DevIssueDraft, status: str) -> DevIssu
 
 
 async def file_draft(session: Session, user_id: int, draft_id: int) -> DevIssueDraft:
-    """Create the issue on GitHub and attach it to the chosen project (human-approved).
+    """File the draft on GitHub (human-approved) — the only GitHub mutation path.
 
-    Idempotent with partial-state recording: the issue number/url is stored the moment
-    creation succeeds, so if the project-attach fails the retry re-runs ONLY the GraphQL
-    step — an issue is never double-created. Filing needs a valid PAT; a GitHub failure
-    surfaces as an `ApiError` (rollback-not-blind-retry)."""
+    `kind=issue`: create the issue + attach it to the chosen project, idempotent with
+    partial-state recording — the issue number/url is stored the moment creation
+    succeeds, so if the project-attach fails the retry re-runs ONLY the GraphQL step
+    (an issue is never double-created).
+
+    `kind=comment` (goal 12b): ONE comment on the pre-existing target issue — no
+    create_issue, no project attach, no partial-state dance. Success flips to `filed`
+    with the comment URL; failure leaves the draft untouched for a retry click.
+    Comments are the only mutation ever applied to a pre-existing GitHub object.
+
+    Filing needs a valid PAT; a GitHub failure surfaces as an `ApiError`
+    (rollback-not-blind-retry)."""
     draft = _owned_draft(session, user_id, draft_id)
     if draft.status == DISMISSED:
         raise ApiError(409, "draft_dismissed", "A dismissed draft cannot be filed.")
@@ -721,6 +997,27 @@ async def file_draft(session: Session, user_id: int, draft_id: int) -> DevIssueD
             "no_token_for_owner",
             f"No GitHub token stored for '{owner}'. Add one in the Dev config first.",
         )
+
+    if draft.kind == KIND_COMMENT:
+        if not draft.target_issue_number:
+            raise ApiError(
+                400, "no_comment_target", "This comment draft has no target issue."
+            )
+        if not draft.issue_url:  # already-posted guard (a re-click never double-posts)
+            try:
+                created = await github.create_issue_comment(
+                    pat, owner, repo_name, draft.target_issue_number, draft.body
+                )
+            except github.GithubError as exc:
+                raise ApiError(502, "github_comment_failed", exc.message) from exc
+            draft.issue_url = created["url"]  # the COMMENT's html_url
+            draft.issue_number = draft.target_issue_number
+            draft.status = FILED
+            draft.updated_at = _now()
+            session.add(draft)
+            session.commit()
+            session.refresh(draft)
+        return draft
 
     # Step 1 — create the issue (skipped if a prior attempt already created it).
     if not draft.issue_url:

@@ -2,6 +2,9 @@
 .claude/settings.local.json
 CLAUDE.local.md
 
+# Temporary session-handoff notes (local only, delete after pickup)
+HANDOFF.md
+
 # OAuth tokens / credentials
 *.token.json
 token.json

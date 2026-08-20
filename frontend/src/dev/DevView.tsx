@@ -8,7 +8,10 @@ import {
   type TabKey,
   type TabState,
 } from "./draftTabs";
+import { MentionTextarea } from "./MentionTextarea";
+import type { Member } from "./mentions";
 import { formatScanTally } from "./scanTally";
+import { matchLabel, visibleMatches } from "./similar";
 import { type Project, useDevConfig, useDevPanel } from "./useDevPanel";
 
 /** What an empty lane says, per tab. */
@@ -131,6 +134,7 @@ export function DevView() {
           tab={tab}
           repos={repos}
           listProjects={cfg.listProjects}
+          listMembers={cfg.listMembers}
           onLoadMore={dev.loadMore}
           onPatch={dev.patchDraft}
           onFile={dev.fileDraft}
@@ -153,6 +157,7 @@ function DraftLane({
   tab,
   repos,
   listProjects,
+  listMembers,
   onLoadMore,
   onPatch,
   onFile,
@@ -164,6 +169,7 @@ function DraftLane({
   tab: TabState;
   repos: { full_name: string; description: string; is_default: boolean }[];
   listProjects: (repo: string) => Promise<Project[]>;
+  listMembers: (repo: string) => Promise<Member[]>;
   onLoadMore: (tab: TabKey) => void;
   onPatch: (id: number, patch: Partial<DevDraft>) => void;
   onFile: (id: number) => void | Promise<void>;
@@ -201,6 +207,7 @@ function DraftLane({
           draft={d}
           repos={repos}
           listProjects={listProjects}
+          listMembers={listMembers}
           onPatch={onPatch}
           onFile={onFile}
           onSave={onSave}
@@ -241,6 +248,7 @@ function DraftCard({
   draft,
   repos,
   listProjects,
+  listMembers,
   onPatch,
   onFile,
   onSave,
@@ -250,6 +258,7 @@ function DraftCard({
   draft: DevDraft;
   repos: { full_name: string; description: string; is_default: boolean }[];
   listProjects: (repo: string) => Promise<Project[]>;
+  listMembers: (repo: string) => Promise<Member[]>;
   onPatch: (id: number, patch: Partial<DevDraft>) => void;
   onFile: (id: number) => void | Promise<void>;
   onSave: (id: number) => void;
@@ -262,6 +271,10 @@ function DraftCard({
   const [filing, setFiling] = useState(false);
   // A shelved card is still actionable (goal 12a) — `saved` is a shelf, not a freeze.
   const editable = draft.status === "draft" || draft.status === "saved";
+  // A comment draft's target is fixed (goal 12b): the repo/project dropdowns hide —
+  // re-targeting a comment means dismissing it.
+  const isComment = draft.kind === "comment";
+  const similar = visibleMatches(draft);
 
   useEffect(() => setTitle(draft.title), [draft.title]);
   useEffect(() => setBody(draft.body), [draft.body]);
@@ -269,7 +282,7 @@ function DraftCard({
   // Load the ProjectsV2 projects for the current repo (repopulates on repo change).
   useEffect(() => {
     let live = true;
-    if (!draft.repo || !editable) {
+    if (!draft.repo || !editable || isComment) {
       setProjects([]);
       return;
     }
@@ -279,7 +292,7 @@ function DraftCard({
     return () => {
       live = false;
     };
-  }, [draft.repo, editable, listProjects]);
+  }, [draft.repo, editable, isComment, listProjects]);
 
   const commitTitle = () => {
     if (title.trim() !== draft.title)
@@ -290,8 +303,15 @@ function DraftCard({
   };
 
   const onRepoChange = (repo: string) => {
-    // Changing the repo clears the project (the old one belongs to the old repo).
-    onPatch(draft.id, { repo, project_node_id: null, project_title: null });
+    // Changing the repo clears the project (the old one belongs to the old repo) AND
+    // the similar-issue matches (they were judged against the old repo's issues/PRs —
+    // the server clears them too; the next scan re-matches, no live re-match).
+    onPatch(draft.id, {
+      repo,
+      project_node_id: null,
+      project_title: null,
+      related_issues: null,
+    });
   };
 
   const onProjectChange = (nodeId: string) => {
@@ -322,6 +342,18 @@ function DraftCard({
 
   return (
     <article className={`dev-card${statusClass}`}>
+      {isComment && draft.target_issue_url && (
+        <a
+          className="dev-comment-target"
+          href={draft.target_issue_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="This draft files as a comment on the existing issue"
+        >
+          Comment on {draft.repo}#{draft.target_issue_number} ↗
+        </a>
+      )}
+
       {editable ? (
         <input
           className="dev-card-title"
@@ -337,66 +369,98 @@ function DraftCard({
       )}
 
       {editable ? (
-        <textarea
-          className="dev-card-body"
+        <MentionTextarea
           value={body}
-          onChange={(e) => setBody(e.target.value)}
+          onChange={setBody}
           onBlur={commitBody}
           rows={Math.min(16, Math.max(4, body.split("\n").length + 1))}
-          placeholder="Issue body (markdown)"
+          placeholder={
+            isComment ? "Comment (markdown)" : "Issue body (markdown)"
+          }
+          loadMembers={() => listMembers(draft.repo)}
         />
       ) : (
         <pre className="dev-card-body dev-card-body--static">{draft.body}</pre>
       )}
 
-      <div className="dev-card-controls">
-        <label className="dev-field">
-          <span>Repo</span>
-          <select
-            value={draft.repo}
-            onChange={(e) => onRepoChange(e.target.value)}
-            disabled={!editable}
-          >
-            {!repos.some((r) => r.full_name === draft.repo) && (
-              <option value={draft.repo}>{draft.repo || "(none)"}</option>
-            )}
-            {repos.map((r) => (
-              <option key={r.full_name} value={r.full_name}>
-                {r.full_name}
-                {r.is_default ? " ★" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="dev-field">
-          <span>Project</span>
-          <select
-            value={draft.project_node_id ?? ""}
-            onChange={(e) => onProjectChange(e.target.value)}
-            disabled={!editable}
-          >
-            <option value="">(no project)</option>
-            {draft.project_node_id &&
-              !projects.some((p) => p.node_id === draft.project_node_id) && (
-                <option value={draft.project_node_id}>
-                  {draft.project_title ?? "current project"}
-                </option>
+      {/* A comment card's target is fixed — no repo/project to choose. */}
+      {!isComment && (
+        <div className="dev-card-controls">
+          <label className="dev-field">
+            <span>Repo</span>
+            <select
+              value={draft.repo}
+              onChange={(e) => onRepoChange(e.target.value)}
+              disabled={!editable}
+            >
+              {!repos.some((r) => r.full_name === draft.repo) && (
+                <option value={draft.repo}>{draft.repo || "(none)"}</option>
               )}
-            {projects.map((p) => (
-              <option key={p.node_id} value={p.node_id}>
-                {p.title}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+              {repos.map((r) => (
+                <option key={r.full_name} value={r.full_name}>
+                  {r.full_name}
+                  {r.is_default ? " ★" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="dev-field">
+            <span>Project</span>
+            <select
+              value={draft.project_node_id ?? ""}
+              onChange={(e) => onProjectChange(e.target.value)}
+              disabled={!editable}
+            >
+              <option value="">(no project)</option>
+              {draft.project_node_id &&
+                !projects.some((p) => p.node_id === draft.project_node_id) && (
+                  <option value={draft.project_node_id}>
+                    {draft.project_title ?? "current project"}
+                  </option>
+                )}
+              {projects.map((p) => (
+                <option key={p.node_id} value={p.node_id}>
+                  {p.title}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
 
       {draft.sources.length > 0 && (
         <div className="dev-card-sources">
           {draft.sources.map((s, i) => (
             <span key={i} className="dev-source-chip">
               {s.doc_path} · {formatEntryTs(s.entry_ts)}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* The clickable pre-file affordance (goal 12b): the body's `Related:` line is
+          plain textarea text, so THIS line renders the same validated matches as real
+          anchors — every similar issue/PR is one click away before deciding to file. */}
+      {similar.length > 0 && (
+        <div className="dev-card-similar">
+          <span className="dev-similar-label">Similar:</span>
+          {similar.map((m) => (
+            <span key={`${m.type}-${m.number}`} className="dev-similar-entry">
+              <a
+                href={m.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={m.reason}
+              >
+                {matchLabel(m)} ↗
+              </a>
+              {m.nothing_new && (
+                <em className="dev-nothing-new">
+                  {" "}
+                  — covered by it, nothing new to add
+                </em>
+              )}
             </span>
           ))}
         </div>
@@ -448,6 +512,7 @@ function DraftCard({
                 target="_blank"
                 rel="noopener noreferrer"
               >
+                {isComment ? "Comment on " : ""}
                 {draft.repo}#{draft.issue_number}
               </a>
             )}

@@ -50,6 +50,15 @@ FILED = "filed"
 # The owner declined the draft. Local status flip only — zero GitHub calls.
 DISMISSED = "dismissed"
 
+# ── dev_issue_draft.kind (goal 12b) ───────────────────────────────────────────
+# Same free-text-column convention as `status`. An `issue` draft files as a new GitHub
+# issue (the two-step create + project-attach path); a `comment` draft — a confirmed
+# duplicate carrying new information — files as ONE comment on its `target_issue_number`
+# (no create_issue, no project attach). Comment drafts flow through the 12a lanes
+# exactly like issue drafts; only the filing branch differs.
+KIND_ISSUE = "issue"
+KIND_COMMENT = "comment"
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -150,8 +159,25 @@ class DevIssueDraft(SQLModel, table=True):
     # repo's configured default; the card dropdown can override before filing.
     project_node_id: Optional[str] = Field(default=None)
     project_title: Optional[str] = Field(default=None)
+    # What filing does (goal 12b): `issue` = create a new issue; `comment` = post one
+    # comment on `target_issue_number`. Free-text by the same convention as `status`.
+    kind: str = Field(default=KIND_ISSUE, max_length=20)
+    # A comment draft's target — the EXISTING issue it will comment on. Set by code from
+    # a validated high-confidence match (url/number from the fetched candidate list,
+    # never from LLM output). NULL on issue drafts.
+    target_issue_number: Optional[int] = Field(default=None)
+    target_issue_url: Optional[str] = Field(default=None)
+    # JSON array of validated matches against live GitHub —
+    # [{number, type: issue|pr, state, url, title, confidence, reason, nothing_new?}].
+    # NULL = not yet matched (the NULL-guard: the matcher targets non-settled drafts
+    # whose related_issues IS NULL, once per draft); "[]" = matched, nothing found.
+    # Every url/title/type/state comes from the code-fetched candidate list keyed by
+    # validated number — never from the model. Cleared (back to NULL) on a repo change.
+    related_issues: Optional[str] = Field(default=None)
     # Set the moment issue creation succeeds (partial-state idempotency): once present,
     # a re-file never re-creates the issue — only the project-attach step may retry.
+    # A filed COMMENT draft reuses these columns: issue_url holds the comment's
+    # html_url, issue_number the target issue's number (no extra columns).
     issue_url: Optional[str] = Field(default=None)
     issue_number: Optional[int] = Field(default=None)
     # The created issue's GraphQL node id (needed to attach it to a project).

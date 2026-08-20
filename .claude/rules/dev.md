@@ -2,13 +2,18 @@
 paths: ["backend/app/dev/**", "backend/app/routers/dev.py", "frontend/src/dev/**"]
 ---
 
-# Dev view safety (goal 12; tabs + pagination in 12a)
+# Dev view safety (goal 12; tabs + pagination in 12a; live-GitHub dedup in 12b)
 
 The Dev feature turns meeting-notes Docs into **de-duplicated GitHub issue drafts** the
 owner reviews and files. It adds the **fourth** runtime LLM (the issue **synthesiser**),
 the app's **first Docs read path**, and its **first non-Google write surface** (GitHub).
-Read this before editing anything under `backend/app/dev/`. It follows the same
-LLM-proposes / code-disposes ethos as the router and news.
+Goal 12b adds two more bounded LLM steps (the issue **matcher** and the comment
+**drafter**), the app's **first GitHub reads**, and a **third sanctioned GitHub write**
+(commenting on an existing issue instead of filing a duplicate). Read this before
+editing anything under `backend/app/dev/`. It follows the same LLM-proposes /
+code-disposes ethos as the router and news — and it is a **workflow, not an agent**: no
+LLM step ever calls GitHub or chooses what to fetch next (decision + revisit triggers
+recorded in `docs/goals/goal-12b.md`).
 
 ## The hard contract (what the synthesiser LLM may see)
 
@@ -29,6 +34,41 @@ LLM-proposes / code-disposes ethos as the router and news.
   meetings/timestamps into one draft), not per-entry classification. Drop it to a cheaper
   model via `DEV_MODEL` only if it proves good enough in practice.
 
+## The 12b LLM steps (matcher + comment drafter — both in `synth.py`)
+
+- **Matcher** (`match_issues`, `DEV_MATCH_MODEL` default sonnet, streams with its own
+  `DEV_MATCH_MAX_TOKENS` budget — the `5c6b48e` truncation lesson): one call per repo
+  with unmatched drafts, run **after** `_dispose_synthesis` (the repo is only final
+  post-dispose). Its payload is EXACTLY the pinned field sets — drafts as
+  `DRAFT_MATCH_FIELDS` (`draft_index`, `title`, `body` — a positional index, never the
+  DB id), issue candidates as `ISSUE_CANDIDATE_FIELDS` (`number`, `title`, `labels`),
+  PR candidates as `PR_CANDIDATE_FIELDS` (`number`, `title`, `state`,
+  `description_excerpt`, pre-truncated code-side) — **no candidate URLs, no doc ids, no
+  tokens, no member logins** (pinned-fields test, `ENTRY_FIELDS` pattern).
+- **Matcher scope: the whole unfiled backlog, once per draft.** Every non-settled draft
+  (`draft`/`saved`) whose `related_issues` IS NULL, whatever scan synthesised it;
+  filed/dismissed never; already-matched (even `"[]"`) never again (the NULL-guard).
+  Changing a draft's repo resets `related_issues` to NULL (stale matches; re-matched on
+  the next scan — no live re-match).
+- **Matcher dispose:** every returned `(number, type)` is validated against the fetched
+  candidate set — out-of-set entries are dropped — and the stored `related_issues`
+  url/title/type/state come from the **code-fetched candidate list keyed by validated
+  number, never from LLM output**. The `**Related:** #N, PR #M (merged)` body line is
+  appended by code from validated matches only.
+- **Comment drafter** (`draft_comment`, reuses `DEV_MODEL` — this text faces humans on
+  GitHub; own `DEV_COMMENT_MAX_TOKENS` budget): runs only for a draft whose top
+  **issue** match is `high` confidence. Input: the draft + that ONE issue's body and
+  comment thread (+ a high-matched PR's title/description/commit subjects). Output
+  `{has_new_info, comment_markdown}` → code converts the draft to `kind=comment` (body
+  replaced by the comment markdown — explicit owner sign-off — target set from the
+  validated match, project cleared) or flags the match `nothing_new: true` and leaves
+  an issue draft for the **human** to dismiss — never auto-dismiss.
+- **PRs are never comment targets.** A PR-only match stays a linked issue draft;
+  commenting targets issues exclusively.
+- **Steps are best-effort.** Any GitHub-read/matcher/drafter failure leaves plain issue
+  drafts (`related_issues` NULL retries next scan), never blocks the scan or the
+  cursor, and is reported in the tally (`linked` / `converted` / `matching_skipped`).
+
 ## LLM-proposes / code-disposes
 
 - **The synthesiser only proposes.** Code validates every proposed `repo` against the
@@ -42,6 +82,17 @@ LLM-proposes / code-disposes ethos as the router and news.
   retries **only** the GraphQL `add_issue_to_project` step — an issue is never
   double-created. Failures raise `ApiError` (rollback-not-blind-retry); the card shows
   the error / "attach pending".
+- **`kind` semantics (12b) + the third write.** `dev_issue_draft.kind` is a free-text
+  convention like `status`: `issue` (default) files through the two-step path above;
+  `comment` — a confirmed duplicate carrying new info — files as **one**
+  `github.create_issue_comment` on its `target_issue_number` (no `create_issue`, no
+  project attach, no partial-state dance; success flips to `filed` storing the comment
+  URL in the existing `issue_url`/`issue_number` columns, failure leaves the draft
+  untouched for a retry; an `issue_url` already present is never re-posted). The write
+  set is exactly {create issue, attach to project, comment on issue} — and **comments
+  are the only mutation the app ever applies to a pre-existing GitHub object**: never a
+  PATCH of an existing issue's body/labels/state/assignees, never a comment on a PR. A
+  comment draft's target is fixed — re-targeting means dismissing (repo change → 409).
 - **Every non-filing transition touches nothing.** `dev_issue_draft.status` is
   `draft|saved|filed|dismissed` — a **convention on a free-text column**, not a DB enum
   (goal 12a widened it to include `saved` with **no migration**). Three of the four
@@ -83,6 +134,31 @@ LLM-proposes / code-disposes ethos as the router and news.
   human-deletable. The cursor **advances only after drafts persist** (a crash between the
   LLM and the store re-scans, losing nothing).
 
+## The GitHub read surface (12b — the app's first GitHub reads)
+
+Six read methods in `github.py`, all per-owner-PAT routed, all deterministic code:
+
+- **Candidate fetches** (scan-time, per repo with unmatched drafts):
+  `list_open_issues` (`state=open&sort=updated`, capped `DEV_ISSUE_FETCH_CAP` — open
+  state deliberately not a recency window; **filters out the PR rows** the issues
+  endpoint interleaves via their `pull_request` key) and `list_recent_prs`
+  (`state=all&sort=updated`, capped `DEV_PR_FETCH_CAP`, keeps open + merged, skips
+  closed-unmerged; the list response carries the body, excerpted code-side — zero
+  per-PR calls).
+- **Thread fetches** (drafter stage, only for a high-confidence match): `get_issue` +
+  `list_issue_comments` (newest ~50) for the ONE matched issue;
+  `list_pr_commit_subjects` (first lines only, ~30) for the ONE high-matched PR —
+  **never during candidate fetch** (call-count spy-tested). The PR read ceiling is
+  description + commit subject lines: never diffs, patch bodies, full messages, review
+  threads, file contents, or CI status.
+- **`list_assignees`** — the repo's assignable users, serving
+  `GET /dev/config/members?repo=` for the @-mention typeahead. **Member logins are
+  never fed to any LLM** (synthesiser, matcher, drafter — pinned-fields tests); a
+  mention exists only if the owner typed or picked it, inserted as plain `@login` text
+  (GitHub linkifies on filing — no new write surface, no auto-assign).
+- All reads are **best-effort in the scan**: a failure degrades that repo to "no match
+  info" — drafts persist, the cursor advances, the tally reports the skip.
+
 ## Config + secrets
 
 - **Tokens are the key, one per resource owner; repos/projects are fetched, never
@@ -119,11 +195,14 @@ the switch that keeps the opus call from firing for users who don't use the feat
 ## Layering
 
 - `parser.py` — pure Docs-payload → entries (timestamps, keys). No Google call, no LLM.
-- `synth.py` — the runtime LLM (structured output). No DB, no writes; prompt builders
-  pure + unit-tested for the exact field set (no ids/tokens).
+- `synth.py` — the runtime LLMs (structured output): the synthesiser, the 12b matcher
+  and the comment drafter. No DB, no writes, never imports `dev.github`; prompt
+  builders pure + unit-tested for the exact field sets (no ids/tokens/URLs/logins).
 - `github.py` — the thin GitHub client (httpx): `validate_pat`, `list_repos`,
-  `list_projects_for_repo`, `create_issue` (REST), `add_issue_to_project` (GraphQL). One
-  concern per function, no orchestration, PAT passed explicitly, never logged.
+  `list_projects_for_repo`, the six 12b reads above, and the three writes —
+  `create_issue` (REST), `add_issue_to_project` (GraphQL), `create_issue_comment`
+  (REST). One concern per function, no orchestration, PAT passed explicitly, never
+  logged.
 - `service.py` — deterministic dispose: resolve sources, cursor-scoped read, batch,
   validate + store drafts, advance cursor, own config, and file on human approve. Every
   query `user_id`-scoped (goal 8).

@@ -325,7 +325,52 @@ UI-flow checks (Playwright + the `mutations` request listener above):
   is the point: entries that were read but restate already-filed work say "no new drafts —
   that work is already drafted or filed", a failed/truncated LLM call says "synthesis
   failed … re-scanned", and neither reads as an unread source Doc. `POST /dev/scan-now`
-  returns that tally as `{"tally": {docs_read, new_entries, drafts_created, synthesis_failed}}`.
+  returns that tally as `{"tally": {docs_read, new_entries, drafts_created, synthesis_failed,
+  linked, converted, matching_skipped}}` (the last three are goal 12b).
+
+### Dev view — dedup + comment drafts + mentions (goal 12b)
+
+`GET /dev/drafts` items now carry `kind` (`issue|comment`), `target_issue_number` /
+`target_issue_url`, and `related_issues` (null = not yet matched; `[]` = matched, nothing
+similar; else `[{number, type: issue|pr, state, url, title, confidence, reason,
+nothing_new?}]` — urls/titles provably from the fetched candidate list). Filing a comment
+draft is a **live GitHub write** (one comment on a real issue) — never file during
+verification.
+
+```bash
+# The @-mention member list — dev-flag-gated, per-owner token routing; a PAT that can't
+# list assignees (or a missing token) yields an EMPTY list, never an error.
+curl -s 'http://localhost:8010/dev/config/members?repo=<owner>/<repo>' | jq '.members'
+# → {"members": [{"login": "...", "name": ...}, …]}   (bad repo → 400 bad_repo)
+```
+
+Frontend selectors:
+- `.dev-card-similar` — the Similar line under the sources chips: `.dev-similar-entry`
+  anchors (`target="_blank"`, href = the stored match url; PR entries read
+  `PR #N (open|merged) title`). `.dev-nothing-new` — the "covered by it, nothing new to
+  add" callout on a drafter-confirmed duplicate.
+- `.dev-comment-target` — the comment card's header badge ("Comment on {repo}#{n} ↗",
+  links to the target issue).
+- `.dev-mention-wrap` / `.dev-mention-menu` / `.dev-mention-item` (`--active`) /
+  `.dev-mention-name` — the @-typeahead around the body textarea.
+
+UI-flow checks:
+- **The Similar line is clickable pre-file.** On a matched issue card, every
+  `.dev-card-similar a` is a real anchor with the GitHub URL (new tab) — the body's
+  `Related:` text line is NOT expected to be clickable (plain textarea by design).
+- **Comment cards hide the dropdowns.** A `kind=comment` card shows `.dev-comment-target`
+  and NO `.dev-card-controls` (no repo select, no project select); its body textarea is
+  still editable (blur → one `PATCH /dev/{id}`).
+- **Repo change clears matches.** On an issue card, switching the repo select fires one
+  `PATCH /dev/{id}` and `.dev-card-similar` disappears (matches stale → cleared; they
+  return only on a future scan).
+- **Typing `@` opens the typeahead.** Focus a card body, type `@` → one
+  `GET /dev/config/members?repo=…` (then cached per repo — a second `@` fires none),
+  `.dev-mention-menu` lists logins; picking one inserts plain `@login ` text at the caret
+  and closes the menu. No request is fired on pick (plain text only).
+- **The tally reports the match phase.** After a scan that linked/converted,
+  `.dev-scan-tally` appends `(N linked …, M converted …)`; when GitHub was unreachable it
+  appends `match check skipped — it will retry on the next scan` instead of hiding it.
 
 ## What to capture
 

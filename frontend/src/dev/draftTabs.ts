@@ -15,12 +15,37 @@ export interface DraftSource {
 
 export type DraftStatus = "draft" | "saved" | "filed" | "dismissed";
 
+export type DraftKind = "issue" | "comment";
+
+/**
+ * One validated match against live GitHub (goal 12b). Everything here except
+ * `confidence`/`reason` came from the code-fetched candidate list (never the LLM), so
+ * the card can safely render `url` as a real anchor.
+ */
+export interface RelatedMatch {
+  number: number;
+  type: "issue" | "pr";
+  state: string;
+  url: string;
+  title: string;
+  confidence: "high" | "medium";
+  reason: string;
+  /** The drafter judged the existing issue already covers everything the draft says. */
+  nothing_new?: boolean;
+}
+
 export interface DevDraft {
   id: number;
   title: string;
   body: string;
   repo: string;
   status: DraftStatus;
+  /** goal 12b: `comment` files as one comment on `target_issue_number`. */
+  kind: DraftKind;
+  target_issue_number: number | null;
+  target_issue_url: string | null;
+  /** null = not yet matched against GitHub; [] = matched, nothing similar found. */
+  related_issues: RelatedMatch[] | null;
   sources: DraftSource[];
   project_node_id: string | null;
   project_title: string | null;
