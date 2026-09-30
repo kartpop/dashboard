@@ -1,5 +1,5 @@
 ---
-paths: ["backend/app/writes/**", "backend/app/google/tasks.py", "backend/app/google/docs.py", "backend/app/google/bootstrap.py"]
+paths: ["backend/app/writes/**", "backend/app/google/tasks.py", "backend/app/google/docs.py", "backend/app/google/bootstrap.py", "backend/app/threads/**"]
 ---
 
 # Google write safety (goal 4+)
@@ -64,7 +64,8 @@ patch body.
   a successful insert, do **not** retry-delete blindly — surface the duplicate to the caller (the
   task now exists in both lists; losing it is worse than a visible duplicate).
   **The goal-5 auto-router is NOT a third `delete_task` caller** — its write path is create-only
-  (next bullet).
+  (next bullet). **Neither is threads (goal 14)** — unlinking a next step or archiving a thread
+  leaves the task in its list.
 - **`create_task` has TWO sanctioned callers (goal 5):** (1) the **user create endpoint**
   (`POST /tasks/{list}`); (2) the **auto-router** (`app.router.service`), which creates a task from a
   routed capture. The router's *entire* Google-write surface is **`create_task` + `reschedule`** (the
@@ -72,6 +73,14 @@ patch body.
   may **never** call `delete_task`, the complete/uncomplete `status` write, or `update_content`. This
   create-only contract lives in `.claude/rules/router.md` and is asserted by a router write-path test
   (the router's write dependency set is exactly `{create_task, reschedule, append_note}` from g7).
+- **Threads is the third `create_task` caller (goal 14)** — so the callers are: user create
+  endpoint, auto-router, threads (`app.threads.service.set_next`, which creates a thread's next step
+  in a pinned list). Threads also calls `update_content` (next-step label/note, and completion via
+  `status`), `reschedule` (next-step due) and `move` (switching My Tasks ↔ Follow-ups). Its write
+  dependency set is exactly **`{create_task, update_content, reschedule, move}`**, AST-pinned in
+  `tests/test_threads.py`; it never references `delete_task` or `writes_svc.delete`. Google write
+  first, DB write second in the same request — an orphan task is the accepted failure mode. Rules:
+  `.claude/rules/threads.md`.
 - **`append_note` is a router-only caller (goal 7).** `writes.service.append_note(doc_id, folder_id,
   body_text, summary=None)` is the notes writer: it appends a captured note **insert-only** to the top
   of the configured Doc under an H3 timestamp (`format_note_heading`). Its **only** caller is

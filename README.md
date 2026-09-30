@@ -31,6 +31,20 @@ and shows up on your phone.
   **Undo** toast instead, and a completion can be undone the same way.
 - **Subtasks aren't supported yet** — they render flat for now (proper nesting comes later).
 
+### 🧵 Threads — the story behind each task
+
+My Tasks and Follow-ups show only the latest step of each piece of work. The **Threads** panel
+(under the two task columns) keeps the whole chain: what already happened, plus the one **next
+step**, which is a real task in My Tasks (your move) or Follow-ups (their move).
+
+- **Complete the task anywhere** (here, your phone, Google Tasks) and the thread logs it as done and
+  asks **"What's next?"**. Threads with nothing scheduled sort to the top, so dropped threads are
+  hard to miss.
+- **Log updates** as you go, open any step for its note (a next step's note *is* the task's
+  description), switch a next step between My Tasks and Follow-ups, or archive a thread. Archiving
+  or removing a step never deletes the Google task.
+- Tasks that belong to a thread carry a small badge; click it to jump to the thread.
+
 ### 📝 Scratchpad — dump a thought, it files itself
 
 A capture box for half-formed thoughts. Whatever you type gets **auto-routed**: an actionable
@@ -138,7 +152,21 @@ folder + Docs are app-created per user from the Settings tree, and calendars are
 
 ### 4. Run it
 
-**Backend:**
+**The quick way** — `dev.sh` at the repo root runs both in the background (it applies migrations
+first, and runs `npm install` if `node_modules/` is missing):
+
+```sh
+./dev.sh up                             # backend :8010 + frontend :5173
+./dev.sh status                         # UP/DOWN per service
+./dev.sh logs                           # tail both logs (or: ./dev.sh logs backend|frontend)
+./dev.sh restart                        # down + up
+./dev.sh down                           # stop both
+```
+
+PIDs and logs live in `.dev/` (gitignored). `down` also stops anything else holding `:8010` or
+`:5173`, even if it wasn't started by the script.
+
+**Or run each by hand. Backend:**
 
 ```sh
 cd backend

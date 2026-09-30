@@ -37,6 +37,9 @@ def _reshape_task(task: dict) -> dict:
         # Subtasks render flat (goal 4a MVP); `parent` lets the client guard
         # against ever dropping or duplicating a child task.
         "parent": task.get("parent"),
+        # RFC3339 completion timestamp (goal 14): threads reconcile dates a
+        # completed next step by it. Absent for open tasks.
+        "completed": task.get("completed"),
     }
 
 
@@ -64,6 +67,20 @@ def _fetch_task_lists(creds: "Credentials") -> list[dict]:
 async def get_task_lists(creds: "Credentials") -> list[dict]:
     """Return every task list in the account, each with its tasks."""
     return await asyncio.to_thread(_fetch_task_lists, creds)
+
+
+def _fetch_tasklist_refs(creds: "Credentials") -> list[dict]:
+    service = _tasks_service(creds)
+    return [
+        {"id": tl["id"], "title": tl.get("title", "")}
+        for tl in list_all(service.tasklists())
+    ]
+
+
+async def get_tasklist_refs(creds: "Credentials") -> list[dict]:
+    """Return every task list as `{id, title}` only — no tasks fetched (goal 14:
+    threads resolves a pinned list id without paging every list's tasks)."""
+    return await asyncio.to_thread(_fetch_tasklist_refs, creds)
 
 
 # ── Read helper used by the writes service ────────────────────────────────────

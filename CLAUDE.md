@@ -37,9 +37,12 @@ acceptance criteria for the active milestone — do not work outside that scope.
   `uv run alembic upgrade head` once per schema change, then
   `uv run uvicorn app.main:app --reload --port 8010`.
 - Frontend: `cd frontend && npm install && npm run dev` (serves on `http://localhost:5173`).
+- Or both at once: `./dev.sh up|down|restart|status|logs` from the repo root (migrates first;
+  pids + logs in `.dev/`).
 
 ## Hard constraints
 
 - Never commit OAuth tokens, `CLAUDE.local.md`, or `.claude/settings.local.json`.
+- This is a public repo. When the owner gives examples in chat that name people, organizations, partners, or projects, never carry those names into goal docs, code, tests, fixtures, sample data, or any other committed file. Always use generic examples (e.g. "a partner NGO", "teammate A").
 - Dashboard read paths call the Google API client directly. Do not use MCP or an LLM to read tasks, calendar, or drive.
 - Google Drive/Docs OAuth scope is `drive.file` only — never `documents` or `drive`. Doc/folder IDs come from config, never from LLM output. (ADR: `docs/goals/architecture/drive-access-scoping.md`.)

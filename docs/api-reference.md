@@ -75,6 +75,38 @@ Google writes cover task metadata, task content, and list rename — rank/groupi
 The tasks panel is a daily-driver MVP: create / edit / complete / delete, an arbitrary-date picker,
 an Overdue rollup at the top of each list, and a per-panel refresh.
 
+## Threads (goal 14)
+
+A thread is an ordered list of steps: **done** steps are local history; the last step may be one
+**next** step linked to a real Google Task in `My Tasks` (my move) or `Follow-ups` (their move).
+Google is the source of truth for a next step's title / notes / due. Every call is scoped to the
+signed-in user; every mutation returns the updated `Thread`.
+
+- `GET /threads` — `{threads: Thread[]}`, active and archived, **after a reconcile** against
+  Google: a completed linked task flips its next step to done (dated by the completion, IST); a
+  done step whose task is open again becomes next again if it's the last step and there's no other
+  next; a deleted task removes its next step; an open task refreshes the cached label/note/due. A
+  failed Google fetch serves the cached state.
+- `POST /threads` `{title}` — create (no steps). `PATCH /threads/{id}` `{title?, archived?}` —
+  rename / archive / restore; archiving never touches the linked task.
+- `POST /threads/{id}/steps` `{label, note?, occurred_on?}` — log a done step, inserted **before**
+  the next step; `occurred_on` defaults to today (IST).
+- `POST /threads/{id}/next` `{label, list: "mine"|"follow", due?, note?}` — create the Google task
+  in that pinned list, then link it. **409** if a next step exists; **422** if the pinned list is
+  missing.
+- `PATCH /threads/{id}/steps/{sid}` `{label?, note?, occurred_on?, due?, list?}` — a done step is a
+  local edit; a next step writes through to Google (label/note → content, due → reschedule, list →
+  move, which repoints the link). Unchanged fields are skipped.
+- `POST /threads/{id}/steps/{sid}/complete` — next step only: complete its task, flip the step.
+- `DELETE /threads/{id}/steps/{sid}` — delete a done step, or **unlink** a next step (the Google
+  task stays in its list). Returns the thread plus `unlinked: bool`.
+
+Shapes: `Thread = {id, title, archived, created_at, last_moved_on, steps}` (`last_moved_on` = the
+latest done date, else the creation date); `Step = {id, kind, label, note, occurred_on, list, due,
+tasklist_id, task_id, via}` — `list` is set on the next step, `via` on a done step that came from a
+completed task. A dashboard move (`POST /tasks/{list}/{task}/move`) repoints any linked step to the
+new task id; a move made outside the dashboard reads as a deletion (v0).
+
 ## Scratchpad + auto-router
 
 An append-only capture box files a dumped thought to the right place. A captured entry is run

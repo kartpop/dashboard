@@ -6,6 +6,19 @@
   --muted-bg: #f7f6f4;
   --done: #9ca3af;
   --error: #c0392b;
+  /* Goal 14 (threads): whose move it is — My Tasks reuses the Today green, Follow-ups
+     the Tomorrow amber, and the warning cue is the error red. Tints are mixed from
+     the base so the dark overrides below only restate the bases. */
+  --mine: #047857;
+  --follow: #a16207;
+  --warn: var(--error);
+  --accent: #2563eb;
+  --line: #d6d4d9;
+  --faint: #b9b6be;
+  --mine-bg: color-mix(in srgb, var(--mine) 11%, transparent);
+  --follow-bg: color-mix(in srgb, var(--follow) 13%, transparent);
+  --warn-bg: color-mix(in srgb, var(--warn) 10%, transparent);
+  --accent-bg: color-mix(in srgb, var(--accent) 11%, transparent);
 
   font: 16px/145% system-ui, 'Segoe UI', Roboto, sans-serif;
   color-scheme: light dark;
@@ -22,6 +35,11 @@
     --muted-bg: #1f2028;
     --done: #6b7280;
     --error: #ff7b6b;
+    --mine: #5cc8a8;
+    --follow: #e0b050;
+    --accent: #7aa2f7;
+    --line: #3a3c47;
+    --faint: #555866;
   }
 }
 
@@ -1091,15 +1109,19 @@ h1, h2, h3 {
   overflow-y: auto;
 }
 
-/* Scratchpad: the editor grows to take the larger share (~60% default) of the column
-   and RECENT scrolls in the remainder with its own scrollbar. The split is controlled
-   via --editor-ratio custom property (dragged via the resize handle). */
+/* Scratchpad: the editor takes everything but RECENT, which at rest is sized to its
+   header + 2 entries (goal 14 — the column now spans the full height) and scrolls the
+   rest internally. Once the split handle is dragged the panel gets `data-split` and
+   the --editor-ratio custom property drives both flex shares, as before; RECENT
+   never shrinks below its 2-row rest height. */
 .capture-panel {
   --editor-ratio: 0.7;
+  /* Header row (~1.75rem) + two `.panel li` entries (~2.3rem each). */
+  --recent-rest: 6.5rem;
 }
 
 .capture-panel .capture-form {
-  flex: calc(var(--editor-ratio) * 1000) 1 0;
+  flex: 1 1 0;
   min-height: 0;
 }
 
@@ -1110,11 +1132,19 @@ h1, h2, h3 {
 }
 
 .scratch-recent {
-  flex: calc((1 - var(--editor-ratio)) * 1000) 1 0;
-  min-height: 4rem;
+  flex: 0 0 var(--recent-rest);
+  min-height: var(--recent-rest);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+}
+
+.capture-panel[data-split] .capture-form {
+  flex: calc(var(--editor-ratio) * 1000) 1 0;
+}
+
+.capture-panel[data-split] .scratch-recent {
+  flex: calc((1 - var(--editor-ratio)) * 1000) 1 0;
 }
 
 /* Recent header row: title + the conditional "Route now" backstop button. */
@@ -3090,4 +3120,879 @@ h1, h2, h3 {
 
 .dev-tree-name--folder {
   font-weight: 600;
+}
+
+/* ── Goal 14: Threads panel + the two-row top area ──────────────────────────── */
+
+/* Left block (My Tasks | Follow-ups over Threads) + the scratchpad spanning both
+   rows. The rows split by --r0/--r1 (default 45/55), with a draggable row handle
+   between them (its own 14px track, like the column handles). Items are placed
+   explicitly; DOM order is the stacked order for the ≤1080px layout below. */
+.top-row-resizable {
+  grid-template-rows: minmax(0, var(--r0, 45fr)) var(--handle) minmax(0, var(--r1, 55fr));
+}
+
+.top-row-resizable > .resize-handle--rows {
+  grid-column: 1 / 4;
+  grid-row: 2;
+}
+
+.resize-handle--row {
+  cursor: row-resize;
+  align-items: center;
+}
+
+/* The bar shows on hover/drag so the handles are discoverable (all three). */
+.resize-handle:hover .resize-handle-bar,
+.resize-handle:active .resize-handle-bar {
+  background: var(--done);
+}
+
+.resize-handle--row .resize-handle-bar {
+  width: auto;
+  height: 2px;
+  flex: 1;
+  margin: 0 10px;
+}
+
+.top-row-resizable > .pinned-slot-0 {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.top-row-resizable > .resize-handle--pair {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.top-row-resizable > .pinned-slot-1 {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.top-row-resizable > .threads-panel {
+  grid-column: 1 / 4;
+  grid-row: 3;
+}
+
+.top-row-resizable > .resize-handle--scratch {
+  grid-column: 4;
+  grid-row: 1 / 4;
+}
+
+.top-row-resizable > .capture-panel {
+  grid-column: 5;
+  grid-row: 1 / 4;
+}
+
+@media (max-width: 1080px) {
+  .top-row-resizable {
+    grid-template-rows: none;
+  }
+
+  .top-row-resizable > * {
+    grid-column: auto !important;
+    grid-row: auto !important;
+  }
+}
+
+/* Thread badge on a task row (the task is a thread's live next step). */
+.task-thread-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  max-width: 120px;
+  padding: 1px 7px 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.task-thread-badge span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.task-thread-badge svg {
+  flex-shrink: 0;
+}
+
+.task-thread-badge:hover {
+  border-color: var(--accent);
+}
+
+/* Panel chrome */
+.threads-panel .thr-ph {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-bottom: 8px;
+}
+
+.thr-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.thr-sp {
+  flex: 1;
+}
+
+.thr-fbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  margin-left: 6px;
+}
+
+.thr-fchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg);
+  color: var(--done);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.thr-fchip span {
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.thr-fchip:hover {
+  color: var(--text-h);
+  border-color: var(--faint);
+}
+
+.thr-fchip.on {
+  background: var(--text-h);
+  border-color: var(--text-h);
+  color: var(--bg);
+}
+
+.thr-fchip.on span {
+  color: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+
+.thr-fchip--warn:not(.on) span {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.thr-seg {
+  display: inline-flex;
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.thr-seg button {
+  border: 0;
+  background: var(--bg);
+  color: var(--done);
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.thr-seg button + button {
+  border-left: 1px solid var(--border);
+}
+
+.thr-seg button.on--mine {
+  background: var(--mine-bg);
+  color: var(--mine);
+  font-weight: 600;
+}
+
+.thr-seg button.on--follow {
+  background: var(--follow-bg);
+  color: var(--follow);
+  font-weight: 600;
+}
+
+.thr-seg--view button {
+  display: flex;
+  align-items: center;
+  padding: 3px 7px;
+}
+
+.thr-seg--view button.on {
+  background: var(--muted-bg);
+  color: var(--text-h);
+}
+
+.thr-btn {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.thr-btn:hover {
+  border-color: var(--done);
+  color: var(--text-h);
+}
+
+.thr-btn--primary {
+  background: var(--text-h);
+  border-color: var(--text-h);
+  color: var(--bg);
+}
+
+.thr-btn--primary:hover {
+  color: var(--bg);
+  opacity: 0.88;
+}
+
+.thr-btn--danger,
+.thr-btn--danger:hover {
+  color: var(--warn);
+}
+
+.thr-input,
+.thr-textarea,
+.thr-date {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text-h);
+  font: inherit;
+  outline: none;
+}
+
+.thr-input {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: 13.5px;
+}
+
+.thr-date {
+  padding: 2px 5px;
+  font-size: 12.5px;
+  color-scheme: light dark;
+  min-width: 0;
+}
+
+.thr-input:focus,
+.thr-textarea:focus,
+.thr-date:focus {
+  border-color: var(--done);
+}
+
+.thr-hint {
+  font-size: 11px;
+  color: var(--done);
+}
+
+.thr-empty {
+  font-size: 13.5px;
+  color: var(--done);
+  padding: 18px 4px;
+  margin: 0;
+}
+
+.thr-newrow {
+  display: flex;
+  gap: 8px;
+  padding: 4px 4px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Shared row bits */
+.thr-chip {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.thr-chip--warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.thr-duepill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--mine-bg);
+  color: var(--mine);
+}
+
+.thr-duepill--follow {
+  background: var(--follow-bg);
+  color: var(--follow);
+}
+
+.thr-duepill--late {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.thr-stale {
+  color: var(--warn);
+}
+
+.thr-archived {
+  opacity: 0.55;
+}
+
+.thr-more {
+  border: 0;
+  background: none;
+  color: var(--done);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.thr-more:hover {
+  color: var(--text-h);
+  background: var(--muted-bg);
+}
+
+.thr-caret {
+  display: inline-block;
+  color: var(--faint);
+  font-size: 15px;
+  line-height: 1;
+  transition: transform 0.15s;
+}
+
+.thr-caret--open {
+  transform: rotate(90deg);
+  margin-right: 8px;
+}
+
+.thr-flash {
+  background: var(--accent-bg) !important;
+  transition: none !important;
+}
+
+/* Compact rows: one line per thread */
+.thr-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.thr-crow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  border-radius: 6px;
+  transition: background 0.6s;
+}
+
+.thr-list > .thr-crow:first-child,
+.thr-list > .thr-row:first-child,
+.thr-newrow + .thr-crow,
+.thr-newrow + .thr-row {
+  border-top: 0;
+}
+
+.thr-c-main {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 210px) minmax(0, 1fr) 44px;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thr-c-main:hover {
+  background: var(--muted-bg);
+}
+
+.thr-c-title {
+  font-weight: 600;
+  font-size: 14.5px;
+  color: var(--text-h);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thr-c-mid {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.thr-c-mid .thr-chip,
+.thr-c-mid .thr-duepill {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.thr-ring {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2.5px solid var(--mine);
+}
+
+.thr-ring--follow {
+  border-color: var(--follow);
+}
+
+.thr-c-lb {
+  min-width: 0;
+  font-size: 14px;
+  color: var(--text-h);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thr-c-lb--dim {
+  color: var(--done);
+}
+
+.thr-c-moved {
+  font-size: 12px;
+  color: var(--done);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Detailed rows: title column + horizontal step track */
+.thr-row {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr) 28px;
+  gap: 14px;
+  align-items: start;
+  padding: 12px 4px 10px;
+  border-top: 1px solid var(--border);
+  border-radius: 6px;
+  transition: background 0.6s;
+}
+
+.thr-list--compact .thr-row {
+  margin: 2px 0;
+  background: color-mix(in srgb, var(--muted-bg) 60%, transparent);
+}
+
+.thr-title {
+  font-weight: 600;
+  font-size: 15px;
+  line-height: 1.3;
+  color: var(--text-h);
+  text-wrap: balance;
+}
+
+.thr-title--btn {
+  display: flex;
+  align-items: baseline;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thr-title--btn:hover {
+  color: var(--accent);
+}
+
+.thr-meta {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--done);
+  font-variant-numeric: tabular-nums;
+}
+
+.thr-track {
+  display: flex;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding: 8px 0 4px;
+  scrollbar-width: thin;
+}
+
+.thr-item {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+/* Connector from an item to the next: solid between done steps, dashed into the
+   next step, dashed-warning into the "What's next?" slot. */
+.thr-item--link::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  left: 11px;
+  right: 0;
+  border-top: 2px solid var(--line);
+}
+
+.thr-item--dash::after {
+  border-top-style: dashed;
+}
+
+.thr-item--dash-warn::after {
+  border-top-style: dashed;
+  border-top-color: color-mix(in srgb, var(--warn) 55%, transparent);
+}
+
+.thr-item--earlier.thr-item--link::after {
+  left: auto;
+  width: 14px;
+}
+
+.thr-step {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 145px;
+  padding: 0 14px 0 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thr-dot {
+  position: relative;
+  z-index: 1;
+  width: 12px;
+  height: 12px;
+  margin-bottom: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  box-shadow: 0 0 0 3px var(--bg);
+}
+
+.thr-lb {
+  font-size: 13.5px;
+  line-height: 1.3;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.thr-dt {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--done);
+  font-variant-numeric: tabular-nums;
+}
+
+.thr-noteicon {
+  color: var(--faint);
+  flex-shrink: 0;
+}
+
+.thr-step:hover .thr-lb {
+  color: var(--text-h);
+}
+
+.thr-step:hover .thr-dot {
+  background: var(--done);
+}
+
+.thr-step--next .thr-dot,
+.thr-step--next:hover .thr-dot {
+  background: var(--bg);
+  border: 2.5px solid var(--mine);
+}
+
+.thr-step--follow .thr-dot,
+.thr-step--follow:hover .thr-dot {
+  border-color: var(--follow);
+}
+
+.thr-step--next .thr-lb {
+  color: var(--text-h);
+  font-weight: 550;
+}
+
+.thr-earlier {
+  position: relative;
+  z-index: 1;
+  height: 22px;
+  margin: -5px 14px 0 0;
+  padding: 0 8px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--done);
+  font: inherit;
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.thr-earlier:hover {
+  color: var(--text-h);
+  border-color: var(--faint);
+}
+
+.thr-plus {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-top: -7px;
+  border: 1px dashed var(--line);
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--done);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.thr-row:hover .thr-plus,
+.thr-plus:focus-visible {
+  opacity: 1;
+}
+
+.thr-plus:hover {
+  color: var(--text-h);
+  border-color: var(--faint);
+  border-style: solid;
+}
+
+.thr-slot {
+  min-width: 220px;
+  margin-top: -8px;
+  padding: 7px 10px;
+  border: 1.5px dashed color-mix(in srgb, var(--warn) 55%, transparent);
+  border-radius: 8px;
+  background: var(--warn-bg);
+}
+
+.thr-slot-q {
+  margin-bottom: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.thr-slot-q span {
+  font-weight: 400;
+  color: var(--done);
+}
+
+.thr-slot-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.thr-slot-btns button {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.thr-slot-btns button:hover {
+  border-color: var(--faint);
+  color: var(--text-h);
+}
+
+.thr-slot-btns .thr-slot-mine {
+  color: var(--mine);
+}
+
+.thr-slot-btns .thr-slot-follow {
+  color: var(--follow);
+}
+
+.thr-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 260px;
+  margin: -8px 12px 0 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 12%);
+}
+
+.thr-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.thr-form-row .thr-date {
+  flex: 1;
+}
+
+/* Step popover (portaled, fixed) */
+.thr-pop {
+  position: fixed;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 320px;
+  max-width: calc(100vw - 24px);
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow:
+    0 8px 28px rgb(0 0 0 / 16%),
+    0 1px 3px rgb(0 0 0 / 8%);
+}
+
+.thr-pk {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--done);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.thr-label {
+  font-size: 12.5px;
+  color: var(--done);
+}
+
+.thr-nl {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.thr-nl i {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.thr-textarea {
+  min-height: 92px;
+  padding: 5px 8px;
+  font-size: 13.5px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.thr-pa {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.thr-pa-l {
+  display: flex;
+  gap: 6px;
+}
+
+.thr-menu {
+  min-width: 170px;
+}
+
+/* Threads toasts sit bottom-centre so they never stack on the tasks toast
+   (bottom-right). Reuses the shared `.toast` look. */
+.toast.toast--threads {
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  max-width: min(520px, calc(100vw - 32px));
+}
+
+@media (max-width: 700px) {
+  .thr-c-main {
+    grid-template-columns: 14px minmax(0, 1fr) 36px;
+  }
+
+  .thr-c-mid {
+    grid-column: 2 / 4;
+    grid-row: 2;
+  }
+
+  .thr-row {
+    grid-template-columns: minmax(0, 1fr) 28px;
+  }
+
+  .thr-row > .thr-track {
+    grid-column: 1 / 3;
+  }
+
+  .thr-row > .thr-more {
+    grid-column: 2;
+    grid-row: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thr-crow,
+  .thr-row,
+  .thr-caret {
+    transition: none;
+  }
 }

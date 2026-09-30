@@ -231,6 +231,18 @@ stays — it also dodges the column's `overflow-y:auto` scroll clip).
 
 ---
 
+## Goal 14 — thread badge + completion coupling
+
+- **Badge:** `SortableTask` renders `.task-thread-badge` (icon + truncated thread title, full title
+  in the tooltip) when `actions.threadFor(task.id)` returns a thread. Like every non-handle control
+  it stops `pointerdown`, so it never starts a drag. Click → `actions.onOpenThread(id)`.
+- **`useTasksPanel(options)`:** `onTaskCompleted(taskId)` may return a `CompletionLink` — its
+  message replaces "Task completed", its `actionLabel`/`onAction` become a second toast button
+  (`ActionToast.actionLabel` → `runToastAction`, which closes the window as if it lapsed, then runs
+  the action), and its `onUndo` runs inside the existing Undo. `onTaskWritten(taskId)` fires after
+  an edit / due / reschedule / move / complete / undo resolves (the pre-move id for moves). Both
+  live in a ref; the hook's state machines are otherwise unchanged.
+
 ## Bug log — what broke, why, and what fixed it
 
 ### 1. Groups can only be dragged once

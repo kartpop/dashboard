@@ -20,6 +20,27 @@ export interface Task {
 // window closes (Undo = cancel, zero Google writes).
 export interface ActionToast {
   message: string;
+  // An optional second action beside Undo (goal 14: "Set next step" when the
+  // completed task was a thread's next step).
+  actionLabel?: string;
+}
+
+// Goal 14 coupling, supplied by DashboardPage (which owns both this hook and the
+// threads hook — panels never import each other).
+export interface CompletionLink {
+  message: string;
+  actionLabel: string;
+  onAction: () => void;
+  onUndo: () => void;
+}
+
+export interface TasksPanelOptions {
+  // A task is being completed: return the thread-aware toast (and flip the thread
+  // optimistically), or null when the task is not a thread's next step.
+  onTaskCompleted?: (taskId: string) => CompletionLink | null;
+  // A write to this task resolved (edit / due / move / complete / undo), so a
+  // linked thread can refresh. `taskId` is the id the write was made against.
+  onTaskWritten?: (taskId: string) => void;
 }
 
 const ACTION_TOAST_MS = 5000;
@@ -378,7 +399,16 @@ function insertTaskIntoListBucket(
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
-export function useTasksPanel() {
+export function useTasksPanel(options: TasksPanelOptions = {}) {
+  // Latest options in a ref: the callbacks run inside handlers created once.
+  const optionsRef = useRef(options);
+  useEffect(() => {
+    optionsRef.current = options;
+  });
+  const written = useCallback((taskId: string) => {
+    optionsRef.current.onTaskWritten?.(taskId);
+  }, []);
+
   const [state, setState] = useState<TasksPanelState>({
     taskLists: [],
     isLoading: true,
@@ -440,6 +470,7 @@ export function useTasksPanel() {
   const toastTimerRef = useRef<number | null>(null);
   const pendingExpireRef = useRef<(() => void) | null>(null);
   const pendingUndoRef = useRef<(() => void) | null>(null);
+  const pendingActionRef = useRef<(() => void) | null>(null);
 
   const commitPending = useCallback(() => {
     if (toastTimerRef.current !== null) {
@@ -449,20 +480,31 @@ export function useTasksPanel() {
     const expire = pendingExpireRef.current;
     pendingExpireRef.current = null;
     pendingUndoRef.current = null;
+    pendingActionRef.current = null;
     if (expire) expire();
   }, []);
 
   const pushActionToast = useCallback(
-    (message: string, onUndo: () => void, onExpire: () => void) => {
+    (
+      message: string,
+      onUndo: () => void,
+      onExpire: () => void,
+      action?: { label: string; run: () => void },
+    ) => {
       commitPending(); // flush any still-open window before opening a new one
       pendingExpireRef.current = onExpire;
       pendingUndoRef.current = onUndo;
-      setState((s) => ({ ...s, actionToast: { message } }));
+      pendingActionRef.current = action?.run ?? null;
+      setState((s) => ({
+        ...s,
+        actionToast: { message, actionLabel: action?.label },
+      }));
       toastTimerRef.current = window.setTimeout(() => {
         toastTimerRef.current = null;
         const expire = pendingExpireRef.current;
         pendingExpireRef.current = null;
         pendingUndoRef.current = null;
+        pendingActionRef.current = null;
         setState((s) => ({ ...s, actionToast: null }));
         if (expire) expire();
       }, ACTION_TOAST_MS);
@@ -478,9 +520,19 @@ export function useTasksPanel() {
     const undo = pendingUndoRef.current;
     pendingExpireRef.current = null;
     pendingUndoRef.current = null;
+    pendingActionRef.current = null;
     setState((s) => ({ ...s, actionToast: null }));
     if (undo) undo();
   }, []);
+
+  // The toast's second action (e.g. "Set next step"): the window closes as if it
+  // lapsed (any held write commits), then the action runs.
+  const runToastAction = useCallback(() => {
+    const run = pendingActionRef.current;
+    commitPending();
+    setState((s) => ({ ...s, actionToast: null }));
+    if (run) run();
+  }, [commitPending]);
 
   // Flush any pending deferred action when the panel unmounts (don't orphan a
   // delete that the user neither undid nor waited out).
@@ -781,15 +833,17 @@ export function useTasksPanel() {
         snapshot = prev.taskLists;
         return updateTaskFields(prev, listId, taskId, patch);
       });
-      apiPatch(`/tasks/${listId}/${taskId}`, patch).catch((err: Error) => {
-        setState((s) => ({
-          ...s,
-          taskLists: snapshot ?? s.taskLists,
-          writeError: `Edit failed: ${err.message}`,
-        }));
-      });
+      apiPatch(`/tasks/${listId}/${taskId}`, patch)
+        .then(() => written(taskId))
+        .catch((err: Error) => {
+          setState((s) => ({
+            ...s,
+            taskLists: snapshot ?? s.taskLists,
+            writeError: `Edit failed: ${err.message}`,
+          }));
+        });
     },
-    [],
+    [written],
   );
 
   // Complete a task: optimistic remove from the active view + IMMEDIATE status
@@ -802,32 +856,40 @@ export function useTasksPanel() {
         snapshot = prev.taskLists;
         return removeTaskFromList(prev, listId, taskId);
       });
-      apiPatch(`/tasks/${listId}/${taskId}`, { status: "completed" }).catch(
-        (err: Error) => {
+      // A thread's next step? Its thread flips optimistically right now and the
+      // toast becomes the thread's "What's next?" (goal 14).
+      const link = optionsRef.current.onTaskCompleted?.(taskId) ?? null;
+      apiPatch(`/tasks/${listId}/${taskId}`, { status: "completed" })
+        .then(() => written(taskId))
+        .catch((err: Error) => {
+          link?.onUndo();
           setState((s) => ({
             ...s,
             taskLists: snapshot ?? s.taskLists,
             writeError: `Complete failed: ${err.message}`,
           }));
-        },
-      );
+        });
       pushActionToast(
-        "Task completed",
+        link?.message ?? "Task completed",
         () => {
           setState((s) => ({ ...s, taskLists: snapshot ?? s.taskLists }));
+          link?.onUndo();
           apiPatch(`/tasks/${listId}/${taskId}`, {
             status: "needsAction",
-          }).catch((err: Error) => {
-            setState((s) => ({
-              ...s,
-              writeError: `Undo failed: ${err.message}`,
-            }));
-          });
+          })
+            .then(() => written(taskId))
+            .catch((err: Error) => {
+              setState((s) => ({
+                ...s,
+                writeError: `Undo failed: ${err.message}`,
+              }));
+            });
         },
         () => {}, // expire: the complete write already happened
+        link ? { label: link.actionLabel, run: link.onAction } : undefined,
       );
     },
-    [pushActionToast],
+    [pushActionToast, written],
   );
 
   // Delete a task: optimistic remove + Undo toast. The Google DELETE is HELD
@@ -895,7 +957,10 @@ export function useTasksPanel() {
         due_date: dueDate,
         group_id: null,
       })
-        .then(() => refetchSilently().catch(() => {}))
+        .then(() => {
+          written(taskId);
+          return refetchSilently().catch(() => {});
+        })
         .catch((err: Error) => {
           setState((s) => ({
             ...s,
@@ -904,7 +969,7 @@ export function useTasksPanel() {
           }));
         });
     },
-    [refetchSilently],
+    [refetchSilently, written],
   );
 
   // Rename a list header → PATCH the tasklists resource. Component guards
@@ -981,16 +1046,18 @@ export function useTasksPanel() {
         due_date: dueDate,
         rank: newRank,
         group_id: destGroupId,
-      }).catch((err: Error) => {
-        const snapshot = snapshotRef.current;
-        setState((s) => ({
-          ...s,
-          taskLists: snapshot ?? s.taskLists,
-          writeError: `Reschedule failed: ${err.message}`,
-        }));
-      });
+      })
+        .then(() => written(taskId))
+        .catch((err: Error) => {
+          const snapshot = snapshotRef.current;
+          setState((s) => ({
+            ...s,
+            taskLists: snapshot ?? s.taskLists,
+            writeError: `Reschedule failed: ${err.message}`,
+          }));
+        });
     },
-    [],
+    [written],
   );
 
   // Move a task to another list via the menu (insert + delete on the backend).
@@ -1032,6 +1099,7 @@ export function useTasksPanel() {
               rank: res.rank,
             }),
           );
+          written(taskId);
         })
         .catch((err: Error) => {
           setState((s) => ({
@@ -1041,7 +1109,7 @@ export function useTasksPanel() {
           }));
         });
     },
-    [],
+    [written],
   );
 
   // Cross-list drag (goal 6): move a task between the two pinned lists in one
@@ -1132,6 +1200,7 @@ export function useTasksPanel() {
               group_id: res.group_id,
             }),
           );
+          written(taskId);
         })
         .catch((err: Error) => {
           setState((s) => ({
@@ -1141,7 +1210,7 @@ export function useTasksPanel() {
           }));
         });
     },
-    [],
+    [written],
   );
 
   return {
@@ -1164,5 +1233,6 @@ export function useTasksPanel() {
     renameList,
     refresh,
     undoActionToast,
+    runToastAction,
   };
 }
