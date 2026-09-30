@@ -152,7 +152,21 @@ folder + Docs are app-created per user from the Settings tree, and calendars are
 
 ### 4. Run it
 
-**Backend:**
+**The quick way** — `dev.sh` at the repo root runs both in the background (it applies migrations
+first, and runs `npm install` if `node_modules/` is missing):
+
+```sh
+./dev.sh up                             # backend :8010 + frontend :5173
+./dev.sh status                         # UP/DOWN per service
+./dev.sh logs                           # tail both logs (or: ./dev.sh logs backend|frontend)
+./dev.sh restart                        # down + up
+./dev.sh down                           # stop both
+```
+
+PIDs and logs live in `.dev/` (gitignored). `down` also stops anything else holding `:8010` or
+`:5173`, even if it wasn't started by the script.
+
+**Or run each by hand. Backend:**
 
 ```sh
 cd backend

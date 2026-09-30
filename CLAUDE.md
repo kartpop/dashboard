@@ -37,6 +37,8 @@ acceptance criteria for the active milestone — do not work outside that scope.
   `uv run alembic upgrade head` once per schema change, then
   `uv run uvicorn app.main:app --reload --port 8010`.
 - Frontend: `cd frontend && npm install && npm run dev` (serves on `http://localhost:5173`).
+- Or both at once: `./dev.sh up|down|restart|status|logs` from the repo root (migrates first;
+  pids + logs in `.dev/`).
 
 ## Hard constraints
 
