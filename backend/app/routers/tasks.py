@@ -13,6 +13,7 @@ from app.db import get_session
 from app.errors import ApiError
 from app.google import tasks as tasks_client
 from app.overlay import service as overlay_svc
+from app.threads import service as threads_svc
 from app.writes import service as writes_svc
 
 logger = logging.getLogger(__name__)
@@ -124,7 +125,7 @@ async def move_task(
     session: Session = Depends(get_session),
 ):
     fields = body.model_fields_set
-    return await writes_svc.move(
+    result = await writes_svc.move(
         session,
         creds,
         user.id,
@@ -135,6 +136,17 @@ async def move_task(
         due_date=body.due_date if "due_date" in fields else writes_svc._UNSET,
         group_id=body.group_id,
     )
+    # A move re-mints the task id (insert-then-delete); a thread step linked to the
+    # old id must follow it, or the next reconcile reads it as deleted (goal 14).
+    threads_svc.repoint_link(
+        session,
+        user.id,
+        tasklist_id,
+        task_id,
+        body.target_list_id,
+        result["new_task_id"],
+    )
+    return result
 
 
 # ── Task content CRUD (goal 4a) ────────────────────────────────────────────────

@@ -85,6 +85,8 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
       const offset = e.clientY - rect.top;
       const ratio = Math.max(0.5, Math.min(0.85, offset / rect.height));
       panel.style.setProperty("--editor-ratio", ratio.toString());
+      // Leave the 2-row RECENT rest size for the dragged ratio split (see CSS).
+      panel.dataset.split = "";
     };
 
     const handleMouseUp = () => {

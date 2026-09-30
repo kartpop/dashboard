@@ -52,6 +52,35 @@ interface TaskActions {
   onEditNotes: (taskId: string, notes: string) => void;
   onSetDueDate: (taskId: string, date: string | null) => void;
   onDelete: (taskId: string) => void;
+  // Goal 14: the thread whose live next step this task is (badge), if any.
+  threadFor?: (taskId: string) => ThreadRef | undefined;
+  onOpenThread?: (threadId: number) => void;
+}
+
+// A thread linked to a task row, as DashboardPage derives it from the threads
+// payload (this panel never imports the threads panel).
+export interface ThreadRef {
+  id: number;
+  title: string;
+}
+
+function ThreadBadgeIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      aria-hidden
+    >
+      <circle cx="2" cy="6" r="1.5" fill="currentColor" />
+      <circle cx="6.5" cy="6" r="1.5" fill="currentColor" />
+      <circle cx="10.5" cy="6" r="1.3" />
+      <path d="M3.5 6h1.5M8 6h1.2" />
+    </svg>
+  );
 }
 
 /** RFC3339 UTC due → "YYYY-MM-DD" (IST) for an <input type="date">; "" if unset. */
@@ -237,6 +266,16 @@ function SortableTask({ task, compact, actions }: SortableTaskProps) {
   const [notesOpen, setNotesOpen] = useState(false);
   const [notesInput, setNotesInput] = useState(task.notes ?? "");
 
+  // The task changed underneath us (a refresh after a thread-popover edit, the
+  // phone, …): pull the new title/notes into the local drafts — unless the user
+  // has unsaved typing in them (draft ≠ the value it was seeded from).
+  const [seen, setSeen] = useState({ title: task.title, notes: task.notes });
+  if (task.title !== seen.title || task.notes !== seen.notes) {
+    setSeen({ title: task.title, notes: task.notes });
+    if (!editing || titleInput === seen.title) setTitleInput(task.title);
+    if (notesInput === (seen.notes ?? "")) setNotesInput(task.notes ?? "");
+  }
+
   useEffect(() => {
     if (!menuOpen) return;
     function onPointerDown(e: PointerEvent) {
@@ -285,6 +324,8 @@ function SortableTask({ task, compact, actions }: SortableTaskProps) {
     transition,
     opacity: isDragging ? 0.4 : 1,
   };
+
+  const thread = actions.threadFor?.(task.id);
 
   return (
     <li
@@ -335,6 +376,20 @@ function SortableTask({ task, compact, actions }: SortableTaskProps) {
           >
             {task.title}
           </span>
+        )}
+        {thread && (
+          // Its own control, like every other non-handle control: it stops
+          // pointerdown so clicking it never starts a drag (tasks-panel.md).
+          <button
+            className="task-thread-badge"
+            title={`Thread: ${thread.title}`}
+            aria-label={`Open thread ${thread.title}`}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => actions.onOpenThread?.(thread.id)}
+          >
+            <ThreadBadgeIcon />
+            <span>{thread.title}</span>
+          </button>
         )}
         <button
           className={`notes-toggle${notesOpen ? " notes-toggle--open" : ""}${task.notes ? " notes-toggle--has" : ""}`}
@@ -658,6 +713,9 @@ function TaskListColumn({
   allLists,
   tasks,
   compactDates,
+  className,
+  threadLinks,
+  onOpenThread,
 }: {
   list: TaskList;
   allLists: ListRef[];
@@ -665,6 +723,9 @@ function TaskListColumn({
   // Pinned columns (My Tasks / Follow-ups) hide the per-row date — the bucket is
   // already the date — keeping only the calendar-picker icon (see CSS).
   compactDates?: boolean;
+  className?: string;
+  threadLinks?: Map<string, ThreadRef>;
+  onOpenThread?: (threadId: number) => void;
 }) {
   const otherLists = allLists.filter((l) => l.id !== list.id);
 
@@ -679,6 +740,8 @@ function TaskListColumn({
       tasks.editTaskField(list.id, taskId, { notes }),
     onSetDueDate: (taskId, date) => tasks.setDueDate(list.id, taskId, date),
     onDelete: (taskId) => tasks.deleteTask(list.id, taskId),
+    threadFor: threadLinks ? (taskId) => threadLinks.get(taskId) : undefined,
+    onOpenThread,
   };
 
   // Inline rename of the list header + the per-list "+ add task" affordance.
@@ -718,7 +781,7 @@ function TaskListColumn({
 
   return (
     <section
-      className={`panel task-column${compactDates ? " task-column--compact-dates" : ""}`}
+      className={`panel task-column${compactDates ? " task-column--compact-dates" : ""}${className ? ` ${className}` : ""}`}
     >
       <div className="panel-head">
         {renaming ? (
@@ -1222,18 +1285,27 @@ function allListRefs(taskLists: TaskList[]): ListRef[] {
 const DEFAULT_WIDTHS = [0.3, 0.3, 0.4];
 const HANDLE_PX = 14;
 const MIN_FRAC = 0.14;
+// Goal 14: the left block's tasks/threads split (tasks share), dragged by the row
+// handle between them. Ephemeral like the widths; clamped so neither row vanishes.
+const DEFAULT_ROW_SPLIT = 0.45;
+const MIN_ROW_FRAC = 0.2;
 
 function ResizeHandle({
   onPointerDown,
+  className,
+  horizontal,
 }: {
   onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  className?: string;
+  // A row divider (drag up/down) rather than a column divider.
+  horizontal?: boolean;
 }) {
   return (
     <div
-      className="resize-handle"
+      className={`resize-handle${horizontal ? " resize-handle--row" : ""}${className ? ` ${className}` : ""}`}
       role="separator"
-      aria-orientation="vertical"
-      aria-label="resize columns"
+      aria-orientation={horizontal ? "horizontal" : "vertical"}
+      aria-label={horizontal ? "resize tasks and threads" : "resize columns"}
       onPointerDown={onPointerDown}
     >
       <span className="resize-handle-bar" />
@@ -1242,22 +1314,31 @@ function ResizeHandle({
 }
 
 /**
- * The full-width top row: the pinned pair (My Tasks | Follow-ups) under ONE shared
- * DndContext so a task can be dragged between them, plus the scratchpad as the
- * third column — all in a single resizable grid. A missing pinned title degrades
- * to an empty-column hint without affecting the other columns. The scratchpad is
- * passed in (composed by DashboardPage) so this panel imports no sibling panel.
+ * The full-width top area: the pinned pair (My Tasks | Follow-ups) under ONE shared
+ * DndContext so a task can be dragged between them, the Threads panel spanning both
+ * pinned columns in a second row (goal 14), and the scratchpad as the right column
+ * spanning both rows — all in a single resizable grid. A missing pinned title
+ * degrades to an empty-column hint without affecting the other columns. Threads and
+ * the scratchpad are passed in (composed by DashboardPage) so this panel imports no
+ * sibling panel.
  */
 export function PinnedTasksRow({
   tasks,
   scratchpad,
+  threads,
+  threadLinks,
+  onOpenThread,
 }: {
   tasks: TasksHook;
   scratchpad: ReactNode;
+  threads?: ReactNode;
+  threadLinks?: Map<string, ThreadRef>;
+  onOpenThread?: (threadId: number) => void;
 }) {
   const { taskLists, isLoading, error } = tasks;
   const allLists = allListRefs(taskLists);
   const [widths, setWidths] = useState(DEFAULT_WIDTHS);
+  const [rowSplit, setRowSplit] = useState(DEFAULT_ROW_SPLIT);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const resolved = PINNED_LIST_TITLES.map((title) => ({
@@ -1307,7 +1388,35 @@ export function PinnedTasksRow({
     document.body.style.userSelect = "none";
   }
 
+  // Drag the row handle: pointer dy as a fraction of the height left after the
+  // handle row shifts height between the task columns and Threads.
+  function beginRowResize(e: ReactPointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    const container = containerRef.current;
+    if (!container) return;
+    const avail = container.clientHeight - HANDLE_PX;
+    if (avail <= 0) return;
+    const startY = e.clientY;
+    const start = rowSplit;
+    function onMove(ev: PointerEvent) {
+      const next = start + (ev.clientY - startY) / avail;
+      setRowSplit(Math.min(1 - MIN_ROW_FRAC, Math.max(MIN_ROW_FRAC, next)));
+    }
+    function onUp() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "row-resize";
+  }
+
   const gridStyle = {
+    "--r0": `${rowSplit}fr`,
+    "--r1": `${1 - rowSplit}fr`,
     "--w0": `${widths[0]}fr`,
     "--w1": `${widths[1]}fr`,
     "--w2": `${widths[2]}fr`,
@@ -1319,15 +1428,15 @@ export function PinnedTasksRow({
   let slot1: ReactNode;
   if (isLoading || error) {
     slot0 = (
-      <section className="panel task-column">
+      <section className="panel task-column pinned-slot-0">
         <p className={`panel-status${error ? " panel-error" : ""}`}>
           {error ?? "Loading…"}
         </p>
       </section>
     );
-    slot1 = <section className="panel task-column" aria-hidden />;
+    slot1 = <section className="panel task-column pinned-slot-1" aria-hidden />;
   } else {
-    const [s0, s1] = resolved.map(({ title, list }) =>
+    const [s0, s1] = resolved.map(({ title, list }, i) =>
       list ? (
         <TaskListColumn
           key={title}
@@ -1335,9 +1444,15 @@ export function PinnedTasksRow({
           allLists={allLists}
           tasks={tasks}
           compactDates
+          className={`pinned-slot-${i}`}
+          threadLinks={threadLinks}
+          onOpenThread={onOpenThread}
         />
       ) : (
-        <section key={title} className="panel task-column pinned-missing">
+        <section
+          key={title}
+          className={`panel task-column pinned-missing pinned-slot-${i}`}
+        >
           <div className="panel-head">
             <h2 className="list-title">{title}</h2>
           </div>
@@ -1356,10 +1471,26 @@ export function PinnedTasksRow({
     <div className="top-row-resizable" ref={containerRef} style={gridStyle}>
       <DndListGroup lists={foundLists} tasks={tasks}>
         {slot0}
-        <ResizeHandle onPointerDown={(e) => beginResize(0, e)} />
+        <ResizeHandle
+          className="resize-handle--pair"
+          onPointerDown={(e) => beginResize(0, e)}
+        />
         {slot1}
       </DndListGroup>
-      <ResizeHandle onPointerDown={(e) => beginResize(1, e)} />
+      {/* DOM order is the stacked (≤1080px) order: My Tasks, Follow-ups, Threads,
+          Scratchpad. The wide grid places each item explicitly (see CSS). */}
+      {threads && (
+        <ResizeHandle
+          horizontal
+          className="resize-handle--rows"
+          onPointerDown={beginRowResize}
+        />
+      )}
+      {threads}
+      <ResizeHandle
+        className="resize-handle--scratch"
+        onPointerDown={(e) => beginResize(1, e)}
+      />
       {scratchpad}
     </div>
   );
@@ -1371,7 +1502,13 @@ export function PinnedTasksRow({
  * mount covers every column. State comes from the one lifted `useTasksPanel`.
  */
 export function TasksToasts({ tasks }: { tasks: TasksHook }) {
-  const { writeError, actionToast, dismissWriteError, undoActionToast } = tasks;
+  const {
+    writeError,
+    actionToast,
+    dismissWriteError,
+    undoActionToast,
+    runToastAction,
+  } = tasks;
 
   // Auto-dismiss the error toast after ~4s. (The action toast self-expires in
   // the hook after ~5s, committing any deferred write.)
@@ -1386,6 +1523,11 @@ export function TasksToasts({ tasks }: { tasks: TasksHook }) {
       {actionToast && (
         <div className="toast toast--action" role="status">
           <span>{actionToast.message}</span>
+          {actionToast.actionLabel && (
+            <button className="toast-undo" onClick={runToastAction}>
+              {actionToast.actionLabel}
+            </button>
+          )}
           <button className="toast-undo" onClick={undoActionToast}>
             Undo
           </button>

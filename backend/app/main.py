@@ -22,6 +22,7 @@ from app.news import scheduler as news_scheduler  # noqa: E402
 from app.router import scheduler as router_scheduler  # noqa: E402
 from app.routers import calendar, dev, news, scratch, tasks  # noqa: E402
 from app.settings.router import router as settings_router  # noqa: E402
+from app.threads.router import router as threads_router  # noqa: E402
 
 _log = logging.getLogger(__name__)
 
@@ -104,6 +105,7 @@ app.include_router(calendar.router)
 app.include_router(scratch.router)
 app.include_router(news.router)
 app.include_router(dev.router)
+app.include_router(threads_router)
 
 
 # ── Serve the built frontend (goal 8: single container, one origin) ───────────

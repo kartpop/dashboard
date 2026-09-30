@@ -31,6 +31,19 @@ paths: ["frontend/**"]
   missing title renders an empty-column hint, not a crash. Tasks-surface state is one lifted
   `useTasksPanel` shared by `PinnedTasksRow` / `OtherTasksSection` / `TasksToasts`; the write toasts
   are rendered once (`position: fixed`).
+- **Two-row top area (goal 14):** `PinnedTasksRow`'s grid grew a second row rather than a wrapper
+  (so column resizing keeps working): **left block** = My Tasks | handle | Follow-ups on top
+  and **Threads** spanning those three tracks below, split by `--r0`/`--r1` (default 45/55) with a
+  draggable row handle (`.resize-handle--rows`, its own `--handle` track, clamped 20–80%,
+  ephemeral) between them; **right column** = handle + Scratchpad spanning all three rows. Threads is passed in as a `threads`
+  node (like `scratchpad`). Every grid item is placed explicitly by class (`.pinned-slot-0/1`,
+  `.resize-handle--pair`, `.resize-handle--rows`, `.threads-panel`, `.resize-handle--scratch`,
+  `.capture-panel`); the DOM
+  order is the stacked order at ≤1080px (My Tasks, Follow-ups, Threads, Scratchpad), where the
+  placements reset to `auto`. Tasks + threads state are both lifted to `DashboardPage` (see
+  `.claude/rules/threads.md` for the coupling callbacks). The scratchpad's RECENT rests at header +
+  2 rows (`--recent-rest`); dragging its split sets `data-split` and hands sizing back to
+  `--editor-ratio`.
 - **Optimistic drag/group convention (goal 3+):** All drag and group mutations are optimistic.
   The component computes the new rank from its current local state (midpoint of neighbours)
   and passes it to the hook. The hook applies the state update inside `setState`, then fires

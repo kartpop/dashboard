@@ -41,5 +41,6 @@ acceptance criteria for the active milestone — do not work outside that scope.
 ## Hard constraints
 
 - Never commit OAuth tokens, `CLAUDE.local.md`, or `.claude/settings.local.json`.
+- This is a public repo. When the owner gives examples in chat that name people, organizations, partners, or projects, never carry those names into goal docs, code, tests, fixtures, sample data, or any other committed file. Always use generic examples (e.g. "a partner NGO", "teammate A").
 - Dashboard read paths call the Google API client directly. Do not use MCP or an LLM to read tasks, calendar, or drive.
 - Google Drive/Docs OAuth scope is `drive.file` only — never `documents` or `drive`. Doc/folder IDs come from config, never from LLM output. (ADR: `docs/goals/architecture/drive-access-scoping.md`.)

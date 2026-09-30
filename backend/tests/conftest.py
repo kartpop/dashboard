@@ -20,6 +20,7 @@ import app.dev.models  # noqa: F401
 import app.news.models  # noqa: F401
 import app.overlay.models  # noqa: F401
 import app.router.models  # noqa: F401
+import app.threads.models  # noqa: F401
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient

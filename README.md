@@ -31,6 +31,20 @@ and shows up on your phone.
   **Undo** toast instead, and a completion can be undone the same way.
 - **Subtasks aren't supported yet** — they render flat for now (proper nesting comes later).
 
+### 🧵 Threads — the story behind each task
+
+My Tasks and Follow-ups show only the latest step of each piece of work. The **Threads** panel
+(under the two task columns) keeps the whole chain: what already happened, plus the one **next
+step**, which is a real task in My Tasks (your move) or Follow-ups (their move).
+
+- **Complete the task anywhere** (here, your phone, Google Tasks) and the thread logs it as done and
+  asks **"What's next?"**. Threads with nothing scheduled sort to the top, so dropped threads are
+  hard to miss.
+- **Log updates** as you go, open any step for its note (a next step's note *is* the task's
+  description), switch a next step between My Tasks and Follow-ups, or archive a thread. Archiving
+  or removing a step never deletes the Google task.
+- Tasks that belong to a thread carry a small badge; click it to jump to the thread.
+
 ### 📝 Scratchpad — dump a thought, it files itself
 
 A capture box for half-formed thoughts. Whatever you type gets **auto-routed**: an actionable
