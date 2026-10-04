@@ -24,6 +24,14 @@ export function DashboardPage() {
     onTaskCompleted: (taskId) => {
       const hit = threads.markLinkedCompleted(taskId);
       if (!hit) return null;
+      // Siblings still open (goal 14a): no "What's next?", just a way to the thread.
+      if (hit.remaining > 0)
+        return {
+          message: `Logged “${hit.label}” in ${hit.title}. ${hit.remaining} still open.`,
+          actionLabel: "Show thread",
+          onAction: () => threads.requestThread(hit.threadId, "focus"),
+          onUndo: () => threads.revertLinkedCompleted(hit.threadId),
+        };
       return {
         message: `Logged “${hit.label}” in ${hit.title}. What’s next?`,
         actionLabel: "Set next step",

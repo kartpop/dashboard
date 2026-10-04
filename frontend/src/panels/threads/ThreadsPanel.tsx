@@ -16,7 +16,8 @@ import {
   type Thread,
   type ThreadsHook,
   istDayKey,
-  nextOf,
+  openOf,
+  soonestOpen,
 } from "./useThreadsPanel";
 
 // ── Date helpers (IST day keys, "YYYY-MM-DD") ─────────────────────────────────
@@ -61,6 +62,7 @@ function dueText(due: string): string {
 const isLate = (due: string | null) => !!due && due < istDayKey(0);
 const STALE_DAYS = 10;
 const SHOW_DONE = 3;
+const SHOW_OPEN = 4; // open steps shown in the Detailed stack before "+N more"
 const LIST_SHORT: Record<ListKey, string> = {
   mine: "My task",
   follow: "Follow-up",
@@ -80,18 +82,19 @@ const FILTERS: [Filter, string][] = [
 function matchFilter(t: Thread, f: Filter): boolean {
   if (f === "archived") return t.archived;
   if (t.archived) return false;
-  const n = nextOf(t);
-  if (f === "needs") return !n;
-  if (f === "mine") return n?.list === "mine";
-  if (f === "follow") return n?.list === "follow";
+  // Counts are of threads; one with both kinds of open step is under both chips.
+  const open = openOf(t);
+  if (f === "needs") return open.length === 0;
+  if (f === "mine") return open.some((s) => s.list === "mine");
+  if (f === "follow") return open.some((s) => s.list === "follow");
   return true;
 }
 
-/** Dangling first (least recently moved first), then by next due ascending. */
+/** Dangling first (least recently moved first), then by soonest open due. */
 function sortActive(list: Thread[]): Thread[] {
   return [...list].sort((a, b) => {
-    const na = nextOf(a);
-    const nb = nextOf(b);
+    const na = soonestOpen(a);
+    const nb = soonestOpen(b);
     if (!na && nb) return -1;
     if (na && !nb) return 1;
     if (!na && !nb) return a.last_moved_on.localeCompare(b.last_moved_on);
@@ -232,9 +235,11 @@ function ListSegment({
   );
 }
 
+// `due` carries the last-used date across rapid entry (the form can remount when
+// the thread's first open step lands and the track switches to the stack).
 type Editing =
   | { threadId: number; mode: "log" }
-  | { threadId: number; mode: "next"; list: ListKey };
+  | { threadId: number; mode: "next"; list: ListKey; due?: string };
 
 // ── Inline forms (Enter submits, Esc cancels) ─────────────────────────────────
 
@@ -266,21 +271,29 @@ function LogForm({
   );
 }
 
+/** Rapid entry (goal 14a): Enter creates the step and keeps the form open with
+ * the label cleared and the list + due kept; Esc closes it. */
 function NextForm({
   initialList,
+  initialDue,
   onSubmit,
   onCancel,
 }: {
   initialList: ListKey;
+  initialDue?: string;
   onSubmit: (label: string, list: ListKey, due: string | null) => void;
   onCancel: () => void;
 }) {
   const [text, setText] = useState("");
   const [list, setList] = useState<ListKey>(initialList);
-  const [due, setDue] = useState(istDayKey(1));
+  const [due, setDue] = useState(initialDue ?? istDayKey(1));
+  const inputRef = useRef<HTMLInputElement>(null);
   function onKey(e: ReactKeyboardEvent) {
-    if (e.key === "Enter" && text.trim())
+    if (e.key === "Enter" && text.trim()) {
       onSubmit(text.trim(), list, due || null);
+      setText("");
+      inputRef.current?.focus();
+    }
     if (e.key === "Escape") onCancel();
   }
   return (
@@ -290,6 +303,7 @@ function NextForm({
         className="thr-input"
         placeholder="Next step…"
         aria-label="Next step"
+        ref={inputRef}
         value={text}
         autoFocus
         onChange={(e) => setText(e.target.value)}
@@ -307,7 +321,7 @@ function NextForm({
         />
       </div>
       <div className="thr-hint">
-        Enter creates it in {LIST_LABEL[list]} · Esc cancels
+        Enter creates it in {LIST_LABEL[list]} and keeps going · Esc closes
       </div>
     </div>
   );
@@ -325,6 +339,7 @@ interface TrackItem {
   cls?: string;
 }
 
+/** A done step on the track (open steps render in the OpenStack). */
 function StepButton({
   step,
   onOpen,
@@ -332,27 +347,6 @@ function StepButton({
   step: Step;
   onOpen: (el: HTMLElement) => void;
 }) {
-  if (step.kind === "next") {
-    return (
-      <button
-        type="button"
-        className={`thr-step thr-step--next thr-step--${step.list ?? "mine"}`}
-        onClick={(e) => onOpen(e.currentTarget)}
-      >
-        <span className="thr-dot" />
-        <span className="thr-lb" title={step.label}>
-          {step.label}
-        </span>
-        <DuePill step={step} />
-        {step.note && (
-          <span className="thr-dt">
-            <NoteIcon />
-            note
-          </span>
-        )}
-      </button>
-    );
-  }
   return (
     <button
       type="button"
@@ -369,6 +363,97 @@ function StepButton({
         {step.via && <span>· via {LIST_LABEL[step.via]}</span>}
       </span>
     </button>
+  );
+}
+
+/** One row of the open stack: ring, one-line label, due pill. */
+function OpenStepRow({
+  step,
+  onOpen,
+}: {
+  step: Step;
+  onOpen: (el: HTMLElement) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`thr-orow thr-orow--${step.list ?? "mine"}`}
+      onClick={(e) => onOpen(e.currentTarget)}
+    >
+      <span className="thr-ring-dot" />
+      <span className="thr-olb" title={step.label}>
+        {step.label}
+      </span>
+      <DuePill step={step} />
+      {step.note && <NoteIcon />}
+    </button>
+  );
+}
+
+/** The open block (goal 14a): a dashed fork into a vertical stack of parallel
+ * open steps, soonest due first, folding after SHOW_OPEN; "+ add open step" (or
+ * the rapid-entry form) at the bottom. */
+function OpenStack({
+  open,
+  editing,
+  archived,
+  onOpenStep,
+  onStartNext,
+  onSubmitNext,
+  onCancelEdit,
+}: {
+  open: Step[];
+  editing: Editing | null;
+  archived: boolean;
+  onOpenStep: (step: Step, el: HTMLElement) => void;
+  onStartNext: (list: ListKey) => void;
+  onSubmitNext: (label: string, list: ListKey, due: string | null) => void;
+  onCancelEdit: () => void;
+}) {
+  const [all, setAll] = useState(false);
+  const extra = open.length - SHOW_OPEN;
+  const shown = all || extra <= 0 ? open : open.slice(0, SHOW_OPEN);
+  const fork = open.length > 1 || editing?.mode === "next" || extra > 0;
+  return (
+    <div className="thr-openwrap">
+      <div className={`thr-open${fork ? " thr-open--fork" : ""}`}>
+        {shown.map((s) => (
+          <div key={s.id} className="thr-obranch">
+            <OpenStepRow step={s} onOpen={(el) => onOpenStep(s, el)} />
+          </div>
+        ))}
+        {extra > 0 && (
+          <div className="thr-obranch">
+            <button
+              type="button"
+              className="thr-earlier thr-omore"
+              onClick={() => setAll((v) => !v)}
+            >
+              {all ? "‹ fewer" : `+${extra} more`}
+            </button>
+          </div>
+        )}
+        {editing?.mode === "next" && (
+          <div className="thr-obranch thr-obranch--form">
+            <NextForm
+              initialList={editing.list}
+              initialDue={editing.due}
+              onSubmit={onSubmitNext}
+              onCancel={onCancelEdit}
+            />
+          </div>
+        )}
+      </div>
+      {editing?.mode !== "next" && !archived && (
+        <button
+          type="button"
+          className={`thr-oadd${fork ? " thr-oadd--fork" : ""}`}
+          onClick={() => onStartNext(open[open.length - 1]?.list ?? "mine")}
+        >
+          + add open step
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -396,7 +481,8 @@ function Track({
   onCancelEdit: () => void;
 }) {
   const done = thread.steps.filter((s) => s.kind === "done");
-  const next = nextOf(thread);
+  const open = openOf(thread);
+  const next = open.length > 0;
   let shown = done;
   let hidden = 0;
   if (!showAll && done.length > SHOW_DONE) {
@@ -446,9 +532,19 @@ function Track({
   }
   if (next) {
     items.push({
-      key: `s${next.id}`,
+      key: "open",
       into: "dash",
-      node: <StepButton step={next} onOpen={(el) => onOpenStep(next, el)} />,
+      node: (
+        <OpenStack
+          open={open}
+          editing={editing}
+          archived={thread.archived}
+          onOpenStep={onOpenStep}
+          onStartNext={onStartNext}
+          onSubmitNext={onSubmitNext}
+          onCancelEdit={onCancelEdit}
+        />
+      ),
     });
   } else if (editing?.mode === "next") {
     items.push({
@@ -457,6 +553,7 @@ function Track({
       node: (
         <NextForm
           initialList={editing.list}
+          initialDue={editing.due}
           onSubmit={onSubmitNext}
           onCancel={onCancelEdit}
         />
@@ -899,7 +996,9 @@ function CompactRow({
   onToggle: () => void;
   onMenu: (rect: DOMRect) => void;
 }) {
-  const n = nextOf(thread);
+  const open = openOf(thread);
+  const n = open[0];
+  const others = open.slice(1);
   const moved = daysBetween(thread.last_moved_on, istDayKey(0));
   const done = thread.steps.filter((s) => s.kind === "done");
   const last = done[done.length - 1];
@@ -912,6 +1011,19 @@ function CompactRow({
           {n.label}
         </span>
         <DuePill step={n} />
+        {others.length > 0 && (
+          <span
+            className="thr-chip thr-chip--more"
+            title={others
+              .map(
+                (s) =>
+                  `${s.label} — ${LIST_SHORT[s.list ?? "mine"]} · ${dueLabel(s.due)}`,
+              )
+              .join("\n")}
+          >
+            +{others.length}
+          </span>
+        )}
       </>
     );
   } else if (thread.archived) {
@@ -972,7 +1084,7 @@ function DetailedRow({
   onMenu: (rect: DOMRect) => void;
   children: ReactNode;
 }) {
-  const next = nextOf(thread);
+  const openCount = openOf(thread).length;
   const moved = daysBetween(thread.last_moved_on, istDayKey(0));
   const count = thread.steps.filter((s) => s.kind === "done").length;
   return (
@@ -996,11 +1108,12 @@ function DetailedRow({
         )}
         <div className="thr-meta">
           {count} step{count === 1 ? "" : "s"} ·{" "}
+          {openCount > 0 && `${openCount} open · `}
           <span className={moved >= STALE_DAYS ? "thr-stale" : ""}>
             moved {moved <= 0 ? "today" : `${moved}d ago`}
           </span>
         </div>
-        {!thread.archived && !next && (
+        {!thread.archived && openCount === 0 && (
           <span className="thr-chip thr-chip--warn">No next step</span>
         )}
       </div>
@@ -1087,6 +1200,13 @@ export function ThreadsPanel({ threads }: { threads: ThreadsHook }) {
   function chooseView(v: View) {
     setView(v);
     writeView(v);
+    // Compact means compact: collapse every row expanded in place (and drop the
+    // in-row form / popover that would otherwise hold one open).
+    if (v === "compact") {
+      setOpen(new Set());
+      setEditing(null);
+      setPop(null);
+    }
   }
 
   function toggleOpen(id: number) {
@@ -1184,7 +1304,13 @@ export function ThreadsPanel({ threads }: { threads: ThreadsHook }) {
             setFlash({ id: t.id, nonce: Date.now() });
           }}
           onSubmitNext={(label, l, due) => {
-            setEditing(null);
+            // Rapid entry: the form stays open, remembering list + due.
+            setEditing({
+              threadId: t.id,
+              mode: "next",
+              list: l,
+              due: due ?? undefined,
+            });
             threads.setNextStep(t.id, label, l, due, due ? dueText(due) : "");
             setFlash({ id: t.id, nonce: Date.now() });
           }}

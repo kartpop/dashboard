@@ -34,11 +34,12 @@ and shows up on your phone.
 ### 🧵 Threads — the story behind each task
 
 My Tasks and Follow-ups show only the latest step of each piece of work. The **Threads** panel
-(under the two task columns) keeps the whole chain: what already happened, plus the one **next
-step**, which is a real task in My Tasks (your move) or Follow-ups (their move).
+(under the two task columns) keeps the whole chain: what already happened, plus the open **next
+steps**, each a real task in My Tasks (your move) or Follow-ups (their move). A thread can have
+several open at once (visit one partner, email another) — they stack side by side.
 
-- **Complete the task anywhere** (here, your phone, Google Tasks) and the thread logs it as done and
-  asks **"What's next?"**. Threads with nothing scheduled sort to the top, so dropped threads are
+- **Complete the task anywhere** (here, your phone, Google Tasks) and the thread logs it as done; once
+  nothing is left open it asks **"What's next?"**. Threads with nothing scheduled sort to the top, so dropped threads are
   hard to miss.
 - **Log updates** as you go, open any step for its note (a next step's note *is* the task's
   description), switch a next step between My Tasks and Follow-ups, or archive a thread. Archiving

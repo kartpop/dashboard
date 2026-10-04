@@ -169,14 +169,36 @@ def test_create_log_and_set_follow_up_next(client, google):
     assert body["last_moved_on"] >= "2026-09-01"
 
 
-def test_next_409_when_next_exists(client, google):
+def test_several_open_steps_ordered_by_due(client, google):
+    """Goal 14a: a second and third open step succeed; the open block is served by
+    due ascending (undated last), after every done step."""
     t = _thread(client)
-    assert _next(client, t["id"]).status_code == 201
-    inserts = google.names().count("insert_task")
-    r = _next(client, t["id"], label="Another")
-    assert r.status_code == 409
-    assert r.json()["error"]["code"] == "next_exists"
-    assert google.names().count("insert_task") == inserts  # no Google write
+    _log(client, t["id"], "Shortlisted three")
+    assert (
+        _next(client, t["id"], "Visit NGO 2", "mine", "2026-10-08").status_code == 201
+    )
+    assert _next(client, t["id"], "Email NGO 3", "follow", None).status_code == 201
+    r = _next(client, t["id"], "Visit NGO 1", "mine", "2026-10-05")
+    assert r.status_code == 201, r.text
+    steps = r.json()["steps"]
+    assert [(s["kind"], s["label"]) for s in steps] == [
+        ("done", "Shortlisted three"),
+        ("next", "Visit NGO 1"),
+        ("next", "Visit NGO 2"),
+        ("next", "Email NGO 3"),
+    ]
+    assert len({s["task_id"] for s in steps[1:]}) == 3
+    assert google.names().count("insert_task") == 3
+    # Logging still lands before the whole open block.
+    body = _log(client, t["id"], "Called NGO 1")
+    assert [s["kind"] for s in body["steps"]] == [
+        "done",
+        "done",
+        "next",
+        "next",
+        "next",
+    ]
+    assert body["steps"][1]["label"] == "Called NGO 1"
 
 
 def test_log_step_inserts_before_next(client, google):
@@ -397,7 +419,9 @@ def test_reconcile_uncompleted_last_step_is_next_again(client, google):
     assert step["list"] == "follow" and step["due"] == "2026-10-01"
 
 
-def test_reconcile_uncompleted_not_last_stays_done(client, google):
+def test_reconcile_uncompleted_not_last_rejoins_open_block(client, google):
+    """Goal 14a: a reopened task is open again even with later history, and moves
+    after every done step."""
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
     task = google.task(FOLLOW, nxt["task_id"])
@@ -406,21 +430,149 @@ def test_reconcile_uncompleted_not_last_stays_done(client, google):
     _log(client, t["id"], "Later update")
     task.update(status="needsAction")
     steps = _one(client, t["id"])["steps"]
-    assert [s["kind"] for s in steps] == ["done", "done"]
+    assert [(s["kind"], s["label"]) for s in steps] == [
+        ("done", "Later update"),
+        ("next", "Nudge them"),
+    ]
 
 
-def test_reconcile_uncompleted_with_other_next_stays_done(client, google):
+def test_reconcile_uncompleted_with_other_open_is_open_too(client, google):
     t = _thread(client)
     first = _next(client, t["id"]).json()["steps"][-1]
     google.task(FOLLOW, first["task_id"]).update(status="completed")
     _get(client)
-    _next(client, t["id"], label="New next", lst="mine")
+    _next(client, t["id"], label="New next", lst="mine", due="2026-10-09")
     google.task(FOLLOW, first["task_id"]).update(status="needsAction")
     steps = _one(client, t["id"])["steps"]
     assert [(s["kind"], s["label"]) for s in steps] == [
-        ("done", "Nudge them"),
+        ("next", "Nudge them"),  # due 2026-10-01, sorts first in the open block
         ("next", "New next"),
     ]
+
+
+def _three_open(client, google):
+    t = _thread(client, "NGO visit")
+    _log(client, t["id"], "Shortlisted three")
+    for label, lst, due in (
+        ("Visit NGO 1", "mine", "2026-10-05"),
+        ("Email NGO 3", "follow", "2026-10-06"),
+        ("Visit NGO 2", "mine", "2026-10-08"),
+    ):
+        assert _next(client, t["id"], label, lst, due).status_code == 201
+    steps = _one(client, t["id"])["steps"]
+    return t, {s["label"]: s for s in steps if s["kind"] == "next"}
+
+
+def _complete_in_google(google, step, when):
+    lst = MINE if step["list"] == "mine" else FOLLOW
+    google.task(lst, step["task_id"]).update(status="completed", completed=when)
+
+
+def test_reconcile_one_of_three_completed_joins_history(client, google):
+    t, opened = _three_open(client, google)
+    _complete_in_google(google, opened["Email NGO 3"], "2026-10-02T05:00:00.000Z")
+    steps = _one(client, t["id"])["steps"]
+    assert [(s["kind"], s["label"]) for s in steps] == [
+        ("done", "Shortlisted three"),
+        ("done", "Email NGO 3"),
+        ("next", "Visit NGO 1"),
+        ("next", "Visit NGO 2"),
+    ]
+    assert steps[1]["via"] == "follow"
+
+
+def test_reconcile_deleting_one_of_three_keeps_siblings(client, google):
+    t, opened = _three_open(client, google)
+    del google.lists[MINE]["tasks"][opened["Visit NGO 1"]["task_id"]]
+    steps = _one(client, t["id"])["steps"]
+    assert [s["label"] for s in steps if s["kind"] == "next"] == [
+        "Email NGO 3",
+        "Visit NGO 2",
+    ]
+
+
+def test_reconcile_all_completed_dangles_in_completion_order(client, google):
+    t, opened = _three_open(client, google)
+    # One completes and reconciles; the other two complete before the next poll.
+    _complete_in_google(google, opened["Visit NGO 2"], "2026-10-02T05:00:00.000Z")
+    _get(client)
+    _complete_in_google(google, opened["Visit NGO 1"], "2026-10-04T05:00:00.000Z")
+    _complete_in_google(google, opened["Email NGO 3"], "2026-10-03T05:00:00.000Z")
+    steps = _one(client, t["id"])["steps"]
+    assert all(s["kind"] == "done" for s in steps)  # dangling now
+    assert [s["label"] for s in steps] == [
+        "Shortlisted three",
+        "Visit NGO 2",
+        "Email NGO 3",
+        "Visit NGO 1",
+    ]
+    # Reopening the middle one returns it to the (now one-step) open block.
+    lst = google.task(FOLLOW, opened["Email NGO 3"]["task_id"])
+    lst.update(status="needsAction", completed=None)
+    steps = _one(client, t["id"])["steps"]
+    assert [(s["kind"], s["label"]) for s in steps][-1] == ("next", "Email NGO 3")
+
+
+def test_complete_endpoint_on_one_of_three(client, google, monkeypatch):
+    monkeypatch.setattr(threads_svc, "today_ist", lambda: date(2026, 10, 2))
+    t, opened = _three_open(client, google)
+    sid = opened["Visit NGO 2"]["id"]
+    r = client.post(f"/threads/{t['id']}/steps/{sid}/complete")
+    assert r.status_code == 200, r.text
+    assert [(s["kind"], s["label"]) for s in r.json()["steps"]] == [
+        ("done", "Shortlisted three"),
+        ("done", "Visit NGO 2"),
+        ("next", "Visit NGO 1"),
+        ("next", "Email NGO 3"),
+    ]
+    # Then log an update: it lands after the completion, before the open block.
+    body = _log(client, t["id"], "Debrief")
+    assert [s["label"] for s in body["steps"]][:3] == [
+        "Shortlisted three",
+        "Visit NGO 2",
+        "Debrief",
+    ]
+
+
+def test_delete_one_of_three_unlinks_only_it(client, google):
+    t, opened = _three_open(client, google)
+    victim = opened["Email NGO 3"]
+    r = client.delete(f"/threads/{t['id']}/steps/{victim['id']}")
+    assert r.status_code == 200, r.text
+    assert r.json()["unlinked"] is True
+    assert [s["label"] for s in r.json()["steps"] if s["kind"] == "next"] == [
+        "Visit NGO 1",
+        "Visit NGO 2",
+    ]
+    assert google.task(FOLLOW, victim["task_id"]) is not None
+    assert "delete_task" not in google.names()
+
+
+def test_one_task_linked_once_across_threads(session, user_a):
+    """The per-user one-link-per-task index still holds."""
+    from sqlalchemy.exc import IntegrityError
+
+    from app.threads.models import Thread
+
+    a = Thread(user_id=user_a.id, title="A")
+    b = Thread(user_id=user_a.id, title="B")
+    session.add_all([a, b])
+    session.commit()
+    for t in (a, b):
+        session.add(
+            ThreadStep(
+                thread_id=t.id,
+                user_id=user_a.id,
+                position=1000.0,
+                kind="next",
+                label="Same task",
+                tasklist_id=MINE,
+                task_id="T_SHARED",
+            )
+        )
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
 
 
 def test_reconcile_deleted_removes_next(client, google):

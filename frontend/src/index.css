@@ -3745,20 +3745,153 @@ h1, h2, h3 {
   background: var(--done);
 }
 
-.thr-step--next .thr-dot,
-.thr-step--next:hover .thr-dot {
-  background: var(--bg);
-  border: 2.5px solid var(--mine);
+/* The open block (goal 14a): parallel open steps stacked vertically. The track's
+   dashed connector arrives at the first row's ring; with 2+ rows (or the form /
+   fold) a dashed spine forks down to each branch. Rows are 22px tall, centred on
+   the track's 6px dot line. */
+.thr-open {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: -5px;
+  padding-right: 14px;
 }
 
-.thr-step--follow .thr-dot,
-.thr-step--follow:hover .thr-dot {
+.thr-open--fork {
+  padding-left: 14px;
+}
+
+.thr-open--fork::before {
+  content: "";
+  position: absolute;
+  top: 11px;
+  bottom: 11px;
+  left: 0;
+  border-left: 2px dashed var(--line);
+}
+
+.thr-obranch {
+  position: relative;
+  min-height: 22px;
+  display: flex;
+  align-items: center;
+}
+
+.thr-open--fork .thr-obranch::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  left: -14px;
+  width: 12px;
+  border-top: 2px dashed var(--line);
+}
+
+.thr-obranch--form {
+  align-items: flex-start;
+}
+
+.thr-orow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  max-width: 360px;
+  padding: 0 6px 0 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thr-orow .thr-duepill {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.thr-ring-dot {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 2.5px solid var(--mine);
+  box-shadow: 0 0 0 3px var(--bg);
+}
+
+.thr-orow--follow .thr-ring-dot {
   border-color: var(--follow);
 }
 
-.thr-step--next .thr-lb {
-  color: var(--text-h);
+.thr-olb {
+  min-width: 0;
+  font-size: 13.5px;
   font-weight: 550;
+  color: var(--text-h);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thr-orow:hover .thr-olb {
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+
+.thr-omore {
+  margin: 0;
+}
+
+.thr-openwrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+/* Faint at rest, full on row hover — like the end-of-track "+". */
+.thr-oadd {
+  margin-top: 8px;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--done);
+  font: inherit;
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.thr-oadd--fork {
+  margin-left: 14px;
+}
+
+.thr-row:hover .thr-oadd,
+.thr-oadd:focus-visible {
+  opacity: 1;
+}
+
+.thr-oadd:hover {
+  color: var(--text-h);
+  border-color: var(--faint);
+}
+
+.thr-chip--more {
+  margin: 0;
+  background: var(--muted-bg);
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: default;
 }
 
 .thr-earlier {

@@ -1,13 +1,16 @@
 """Threads service (goal 14): storage, reconcile (Google → threads), and link writes.
 
-A thread's next step is a real Google Task in one of the two pinned lists; Google is
-the source of truth for its title / notes / due. `list_threads` reconciles every
+A thread's next ("open") steps — any number since goal 14a — are real Google Tasks
+in the two pinned lists; Google is the source of truth for their title / notes /
+due. Ranks keep every done step before every open step (the open block); the API
+serves done steps by rank, then open steps by due. `list_threads` reconciles every
 linked step against a fresh fetch before responding:
 
-  - linked task completed          → the next step becomes done (dated by completion)
-  - done step's task back to open  → next again, iff it is the last step and the
-                                     thread has no other next step (undo after reconcile)
-  - linked task gone               → the next step is removed (thread dangles)
+  - linked task completed          → that step becomes done (dated by completion) and
+                                     joins the end of the done history
+  - done step's task back to open  → open again, at the end of the open block, unless
+                                     another open step links that task (undo)
+  - linked task gone               → that step is removed (dangles if it was the last)
   - linked task still open         → refresh the cached label / note / due / list
 
 Google writes go through `app.writes.service` ONLY, and only these four:
@@ -123,8 +126,31 @@ def _get_step(
     return step
 
 
-def _next_step(steps: list[ThreadStep]) -> ThreadStep | None:
-    return next((s for s in steps if s.kind == "next"), None)
+def _open_steps(steps: list[ThreadStep]) -> list[ThreadStep]:
+    return [s for s in steps if s.kind == "next"]
+
+
+def _display_order(steps: list[ThreadStep]) -> list[ThreadStep]:
+    """Done steps by rank, then the open block by due ascending (undated last),
+    ties by rank (creation order)."""
+    done = sorted((s for s in steps if s.kind != "next"), key=lambda s: s.position)
+    opened = sorted(
+        _open_steps(steps),
+        key=lambda s: (s.due is None, s.due or date.max, s.position),
+    )
+    return done + opened
+
+
+def _done_slot(step: ThreadStep, siblings: list[ThreadStep]) -> float:
+    """Rank for a step joining the END of the done history: after the last done
+    step, before the first remaining open step."""
+    first_open = min((s.position for s in _open_steps(siblings)), default=None)
+    done = [s.position for s in siblings if s.kind != "next"]
+    if first_open is None:
+        last = max(done, default=None)
+        return step.position if last is None or last < step.position else last + _GAP
+    lower = [p for p in done if p < first_open]
+    return (max(lower) + first_open) / 2 if lower else first_open - _GAP
 
 
 def serialize_step(step: ThreadStep) -> dict:
@@ -155,7 +181,7 @@ def serialize_thread(thread: Thread, steps: list[ThreadStep]) -> dict:
         "archived": thread.archived_at is not None,
         "created_at": created.isoformat(),
         "last_moved_on": last_moved.isoformat(),
-        "steps": [serialize_step(s) for s in steps],
+        "steps": [serialize_step(s) for s in _display_order(steps)],
     }
 
 
@@ -181,8 +207,15 @@ def _refresh_cache(step: ThreadStep, task: dict, list_id: str, key: str | None) 
     return changed
 
 
-def _flip_done(step: ThreadStep, task: dict, occurred_on: date | None) -> None:
-    """A next step whose task completed becomes done: dated, with a final snapshot."""
+def _flip_done(
+    step: ThreadStep,
+    task: dict,
+    occurred_on: date | None,
+    siblings: list[ThreadStep],
+) -> None:
+    """An open step whose task completed becomes done: dated, with a final snapshot,
+    and re-ranked to the end of the done history (before any remaining open step)."""
+    step.position = _done_slot(step, siblings)
     step.kind = "done"
     step.occurred_on = occurred_on or today_ist()
     step.label = task.get("title") or step.label
@@ -204,6 +237,7 @@ def reconcile(
 
     changed = False
     survivors: list[ThreadStep] = []
+    completed: list[tuple[ThreadStep, dict]] = []
     for step in steps:
         if step.kind == "next" and step.task_id:
             hit = index.get(step.task_id)
@@ -216,36 +250,42 @@ def reconcile(
             if task.get("status") == "completed":
                 if step.via is None:
                     step.via = _list_key(list_id, pinned)
-                _flip_done(step, task, _ist_date(task.get("completed")))
-                changed = True
+                completed.append((step, task))
             elif _refresh_cache(step, task, list_id, _list_key(list_id, pinned)):
                 step.updated_at = _now()
                 changed = True
         survivors.append(step)
 
-    # Undo after a reconcile: a thread's LAST step is a done step whose task is open
-    # again, and the thread has no other next step → it is the next step again.
     by_thread: dict[int, list[ThreadStep]] = {}
     for step in survivors:
         by_thread.setdefault(step.thread_id, []).append(step)
-    live_links = {s.task_id for s in survivors if s.kind == "next" and s.task_id}
-    for tsteps in by_thread.values():
-        last = tsteps[-1]
-        if last.kind != "done" or not last.task_id or _next_step(tsteps):
-            continue
-        hit = index.get(last.task_id)
-        if hit is None or hit[1].get("status") != "needsAction":
-            continue
-        if last.task_id in live_links:
-            continue  # the one-link-per-task invariant wins
-        list_id, task = hit
-        last.kind = "next"
-        last.occurred_on = None
-        _refresh_cache(last, task, list_id, _list_key(list_id, pinned))
-        last.updated_at = _now()
-        live_links.add(last.task_id)
+
+    # Completions join the done history in the order they were completed.
+    completed.sort(key=lambda c: c[1].get("completed") or "")
+    for step, task in completed:
+        siblings = [s for s in by_thread[step.thread_id] if s is not step]
+        _flip_done(step, task, _ist_date(task.get("completed")), siblings)
         changed = True
 
+    # Undo after a reconcile: a done step whose task is open again rejoins the open
+    # block at its end — unless another open step links that task (one link wins).
+    live_links = {s.task_id for s in survivors if s.kind == "next" and s.task_id}
+    for step in survivors:
+        if step.kind != "done" or not step.task_id or step.task_id in live_links:
+            continue
+        hit = index.get(step.task_id)
+        if hit is None or hit[1].get("status") != "needsAction":
+            continue
+        list_id, task = hit
+        step.kind = "next"
+        step.occurred_on = None
+        step.position = max(s.position for s in by_thread[step.thread_id]) + _GAP
+        _refresh_cache(step, task, list_id, _list_key(list_id, pinned))
+        step.updated_at = _now()
+        live_links.add(step.task_id)
+        changed = True
+
+    survivors.sort(key=lambda s: s.position)
     if changed:
         session.commit()
     return survivors
@@ -342,16 +382,14 @@ def add_step(
     note: str | None = None,
     occurred_on: date | None = None,
 ) -> dict:
-    """Log a done step. It lands BEFORE the next step, if there is one (midpoint
-    rank), so the next step stays last; else after everything."""
+    """Log a done step. It lands BEFORE the first open step, if there is one
+    (midpoint rank), so the open block stays last; else after everything."""
     thread = _get_thread(session, user_id, thread_id)
     steps = _steps(session, user_id, thread_id)
-    nxt = _next_step(steps)
-    if nxt is not None:
-        before = [s for s in steps if s.position < nxt.position]
-        position = (
-            (before[-1].position + nxt.position) / 2 if before else nxt.position - _GAP
-        )
+    first_open = min((s.position for s in _open_steps(steps)), default=None)
+    if first_open is not None:
+        before = [s.position for s in steps if s.position < first_open]
+        position = (max(before) + first_open) / 2 if before else first_open - _GAP
     else:
         position = (steps[-1].position + _GAP) if steps else _GAP
     session.add(
@@ -380,15 +418,14 @@ async def set_next(
     due: date | None,
     note: str | None = None,
 ) -> dict:
-    """Create the Google task in the pinned list, THEN insert the linked next step.
+    """Create the Google task in the pinned list, THEN append a linked open step to
+    the open block (a thread may hold any number since goal 14a).
 
-    409 if the thread already has a next step. A `create_task` failure writes no
-    row; a DB failure after a successful create is logged (orphan task, accepted).
+    A `create_task` failure writes no row; a DB failure after a successful create
+    is logged (orphan task, accepted).
     """
     thread = _get_thread(session, user_id, thread_id)
     steps = _steps(session, user_id, thread_id)
-    if _next_step(steps) is not None:
-        raise ApiError(409, "next_exists", "This thread already has a next step.")
     title = _clean(label, "label")
     list_id = await _resolve_list_id(creds, list_key)
 
@@ -538,11 +575,12 @@ async def complete_step(
     thread_id: int,
     step_id: int,
 ) -> dict:
-    """Mark a next step done: complete its Google task, then flip the step."""
+    """Mark an open step done: complete its Google task, then flip the step (its
+    siblings stay open)."""
     thread = _get_thread(session, user_id, thread_id)
     step = _get_step(session, user_id, thread_id, step_id)
     if step.kind != "next":
-        raise ApiError(400, "not_next", "Only the next step can be marked done.")
+        raise ApiError(400, "not_next", "Only an open step can be marked done.")
     updated = await writes_svc.update_content(
         session,
         creds,
@@ -551,7 +589,8 @@ async def complete_step(
         task_id=step.task_id,
         status="completed",
     )
-    _flip_done(step, updated, today_ist())
+    siblings = [s for s in _steps(session, user_id, thread_id) if s.id != step.id]
+    _flip_done(step, updated, today_ist(), siblings)
     _touch(session, thread_id)
     session.commit()
     return thread_payload(session, user_id, thread)
