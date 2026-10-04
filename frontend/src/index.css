@@ -1745,11 +1745,18 @@ h1, h2, h3 {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
 }
 
-/* Below the g6a stacking breakpoint, drop the strip (the header returns to just
-   the title) to match the existing stacking behavior. */
+/* Stacked layout (≤1080px): the strip drops to its own full-width row under the
+   title. It used to be `display: none` here, which left the 641–1080px range with
+   no calendar at all (goal 15). Phones (≤640px) don't render it — they get the
+   agenda row instead. */
 @media (max-width: 1080px) {
+  .dashboard-header {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
   .calendar-strip {
-    display: none;
+    flex-basis: 100%;
   }
 }
 
@@ -4127,5 +4134,1273 @@ h1, h2, h3 {
   .thr-row,
   .thr-caret {
     transition: none;
+  }
+}
+
+/* ── Goal 15: phone layout (≤640px) ────────────────────────────────────────── */
+
+/* The breakpoint is 640px. KEEP IN SYNC with `MOBILE_MAX` in src/useIsMobile.ts —
+   the hook picks which tree renders (bottom bar vs rail, tabs vs grid, sheet vs
+   popover), these rules style it. Components that only ever render at phone width
+   (the bottom bar, sheets, the mobile Home) are styled unconditionally below; the
+   media query at the end only overrides desktop selectors. */
+:root {
+  --bar-h: 58px;
+  --bar-total: calc(var(--bar-h) + env(safe-area-inset-bottom));
+}
+
+/* Bottom sheet (Sheet.tsx) ------------------------------------------------------ */
+.sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  background: rgb(10 8 16 / 38%);
+  animation: sheet-fade 0.18s ease-out;
+}
+
+.sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1301;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 85dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 16px calc(20px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  border-radius: 18px 18px 0 0;
+  background: var(--bg);
+  box-shadow: 0 -10px 30px rgb(20 18 30 / 16%);
+  animation: sheet-up 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+  outline: none;
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes sheet-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+.sheet-grab {
+  flex-shrink: 0;
+  align-self: center;
+  width: 36px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--line);
+}
+
+.sheet-title {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.35;
+  color: var(--text-h);
+  overflow-wrap: anywhere;
+}
+
+.sheet-sub {
+  margin-top: -8px;
+  font-size: 13px;
+  color: var(--done);
+}
+
+/* A stacked action list: 48px rows, hairline dividers. */
+.sheet-list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+}
+
+.sheet-list > button,
+.sheet-list > .sheet-list-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  font-size: 16px;
+  text-align: left;
+  color: var(--text-h);
+  cursor: pointer;
+}
+
+.sheet-list > .sheet-list-note {
+  color: var(--done);
+  cursor: default;
+}
+
+.sheet-list > button.sheet-list-sub {
+  padding-left: 20px;
+  color: var(--text);
+}
+
+.sheet-list > button.sheet-list--danger {
+  color: var(--error);
+}
+
+.sheet-list-icon {
+  display: flex;
+  color: var(--done);
+}
+
+.sheet-list-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* Reschedule chips (task sheet): Today · Tomorrow · Next week · Pick… */
+.sheet-chips {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.sheet-chip {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-height: 52px;
+  padding: 6px 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-h);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.2;
+  text-align: center;
+  cursor: pointer;
+}
+
+.sheet-chip small {
+  font-size: 11.5px;
+  color: var(--done);
+}
+
+.sheet-chip--cur {
+  border-color: var(--text-h);
+  font-weight: 600;
+}
+
+/* The native date input sits invisibly over the chip so a tap opens the picker. */
+.sheet-chip--pick input,
+.m-addrow-date input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.sheet-primary {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 46px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.sheet-primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.sheet-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sheet-form .task-title-input,
+.sheet-form .task-notes {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-h);
+  font: inherit;
+}
+
+.sheet-form .task-notes {
+  min-height: 110px;
+  resize: none;
+}
+
+.sheet-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.sheet-form-actions button {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-h);
+  font: inherit;
+  font-size: 15px;
+}
+
+.sheet-form-actions .sheet-primary {
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Me sheet + quick capture */
+.me-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.me-sheet-head .rail-avatar {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+}
+
+.me-sheet-who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.me-sheet-who .sheet-sub {
+  margin-top: 0;
+  overflow-wrap: anywhere;
+}
+
+.quick-capture-input {
+  width: 100%;
+  min-height: 130px;
+  resize: none;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text-h);
+  font:
+    16px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  outline: none;
+}
+
+.quick-capture-input:focus {
+  border-color: var(--accent);
+}
+
+/* Bottom bar (AppShell) ---------------------------------------------------------- */
+.bottom-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 900;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  padding: 2px 6px env(safe-area-inset-bottom);
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.bottom-bar-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: var(--bar-h);
+  border: 0;
+  background: none;
+  color: var(--done);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.bottom-bar-icon svg {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.bottom-bar-btn--active {
+  color: var(--text-h);
+  font-weight: 600;
+}
+
+.bottom-bar-plus-icon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  background: var(--text-h);
+  color: var(--bg);
+}
+
+.bottom-bar-plus-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* Mobile Home (DashboardPage → MobileHome) --------------------------------------- */
+.m-head {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  padding: env(safe-area-inset-top) 16px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.m-head-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 48px;
+}
+
+.m-logo {
+  width: 28px;
+  height: 28px;
+  margin-right: 4px;
+}
+
+.m-daynav {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+
+.m-daynav button,
+.m-refresh {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--done);
+  cursor: pointer;
+}
+
+.m-daynav svg,
+.m-refresh svg {
+  width: 20px;
+  height: 20px;
+}
+
+.m-daynav .m-day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 620;
+  line-height: 1.15;
+  color: var(--text-h);
+  white-space: nowrap;
+}
+
+.m-day small {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+/* Agenda row: one card per timed event, scrolling sideways. */
+.agenda-row {
+  display: flex;
+  gap: 8px;
+  margin: 0 -16px;
+  padding: 4px 16px 10px;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+}
+
+.agenda-row::-webkit-scrollbar {
+  display: none;
+}
+
+.agenda-card {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  justify-content: center;
+  max-width: 170px;
+  min-height: 44px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-h);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.25;
+  text-align: left;
+  scroll-snap-align: start;
+  cursor: pointer;
+}
+
+.agenda-card b {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--done);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.agenda-card span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agenda-card--past {
+  opacity: 0.45;
+}
+
+.agenda-card--next {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.agenda-card--next b {
+  color: var(--accent);
+}
+
+.agenda-card--empty {
+  color: var(--done);
+  cursor: default;
+}
+
+.agenda-now {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  align-self: stretch;
+  gap: 2px;
+  color: var(--error);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  scroll-snap-align: start;
+}
+
+.agenda-now::before {
+  content: "";
+  flex: 1;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--error);
+}
+
+.agenda-sheet-loc,
+.agenda-sheet-org {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.agenda-sheet-att {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 14px;
+}
+
+.agenda-sheet-att .tt-att-glyph {
+  display: inline-block;
+  width: 18px;
+  color: var(--done);
+}
+
+.agenda-sheet-more {
+  color: var(--done);
+}
+
+/* Section tabs */
+.m-tabs {
+  display: flex;
+  margin: 0 -16px;
+  padding: 0 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.m-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.m-tab {
+  display: flex;
+  flex: 1 0 auto;
+  align-items: baseline;
+  justify-content: center;
+  gap: 5px;
+  min-height: 44px;
+  padding: 11px 6px 9px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--done);
+  font: inherit;
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.m-tab small {
+  font-size: 11.5px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.m-tab[aria-selected="true"] {
+  border-bottom-color: var(--text-h);
+  color: var(--text-h);
+  font-weight: 600;
+}
+
+.m-tab[aria-selected="true"] small {
+  color: var(--done);
+}
+
+.m-pane[hidden] {
+  display: none;
+}
+
+/* Tasks tabs (MobileTaskList) */
+.m-addrow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  margin: 10px 16px 6px;
+  padding: 0 4px 0 12px;
+  border-radius: 10px;
+  background: var(--muted-bg);
+}
+
+.m-addrow-plus {
+  font-size: 18px;
+  color: var(--done);
+}
+
+.m-addrow .add-task-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 0;
+  border: 0;
+  background: none;
+}
+
+.m-addrow-date {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  min-width: 44px;
+  height: 44px;
+  padding: 0 4px;
+  color: var(--done);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.m-addrow-date svg {
+  width: 20px;
+  height: 20px;
+}
+
+.m-addrow .add-task-confirm {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--text-h);
+  color: var(--bg);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.m-tasks .date-group {
+  margin: 0;
+  padding: 0;
+  border-left: 0;
+}
+
+.m-tasks .date-group .date-group-label {
+  margin: 0;
+  padding: 12px 16px 6px;
+  border-radius: 0;
+  font-size: 12px;
+}
+
+.m-task-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.m-task {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  grid-template-areas:
+    "check title more"
+    ". meta more";
+  align-items: start;
+  border-bottom: 1px solid var(--border);
+}
+
+.m-task:last-child {
+  border-bottom: 0;
+}
+
+.m-task-check {
+  grid-area: check;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 48px;
+  cursor: pointer;
+}
+
+.m-task-check .task-check {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--mine);
+}
+
+.m-task-title {
+  grid-area: title;
+  min-height: 48px;
+  padding: 13px 0 12px;
+  border: 0;
+  background: none;
+  color: var(--text-h);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Up to two lines, then an ellipsis — never cut to a few characters. */
+.m-task-title span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.m-task-meta {
+  grid-area: meta;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin-top: -6px;
+  padding-bottom: 10px;
+}
+
+.m-task-meta .task-thread-badge {
+  max-width: 100%;
+  min-height: 26px;
+  font-size: 12px;
+}
+
+.m-task-more {
+  grid-area: more;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--done);
+  cursor: pointer;
+}
+
+.m-task-more svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* Groups render read-only: a name over its rows, behind a soft left rail. */
+.m-group-name {
+  display: block;
+  padding: 8px 16px 2px 44px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.m-group > .m-task-list {
+  margin-left: 20px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.m-group > .m-task-list .m-task {
+  grid-template-columns: 42px minmax(0, 1fr) 44px;
+}
+
+/* Threads tab (ThreadsPanel mobile) */
+.m-thr {
+  border-top: 1px solid var(--border);
+  /* Clear the sticky Home header when a flashed thread scrolls into view. */
+  scroll-margin-top: 190px;
+  transition: background 0.6s;
+}
+
+.m-thr-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  align-items: center;
+}
+
+.m-thr-main {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 0 0 8px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.m-thr-main .thr-caret {
+  justify-self: center;
+  margin: 0;
+}
+
+.m-thr-title {
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 620;
+  color: var(--text-h);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.m-thr-age {
+  padding-left: 8px;
+  font-size: 12.5px;
+  color: var(--done);
+  font-variant-numeric: tabular-nums;
+}
+
+.m-thr-head .thr-more {
+  width: 44px;
+  height: 44px;
+  font-size: 18px;
+}
+
+.m-thr-step {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  width: 100%;
+  padding: 0 16px 12px 8px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.m-thr-step .thr-ring {
+  justify-self: center;
+  margin-top: 5px;
+}
+
+.thr-ring--none {
+  border: 2px dashed var(--warn);
+}
+
+.m-thr-step-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.m-thr-step-text {
+  font-size: 15px;
+  line-height: 1.4;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.m-thr-step-text--dim {
+  color: var(--done);
+}
+
+.m-thr-step-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.m-thr-step-meta .thr-duepill {
+  margin-top: 0;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.m-thr-step .thr-chip {
+  margin-top: 0;
+}
+
+.m-thr-more-steps {
+  font-size: 12.5px;
+  color: var(--done);
+}
+
+.m-thr-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 14px;
+}
+
+.m-thr-done {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: start;
+  width: 100%;
+  min-height: 40px;
+  padding: 4px 16px 4px 8px;
+  border: 0;
+  background: none;
+  color: var(--done);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.m-thr-done .thr-dot {
+  justify-self: center;
+  width: 9px;
+  height: 9px;
+  margin: 6px 0 0;
+  box-shadow: none;
+}
+
+.m-thr-done-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.m-thr-done-text s {
+  text-decoration-color: var(--faint);
+}
+
+.m-thr-done-date {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.m-thr-detail .thr-earlier {
+  align-self: flex-start;
+  height: 32px;
+  margin: 2px 0 0 36px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+
+.m-thr-detail .thr-form {
+  width: auto;
+  margin: 4px 16px 6px 36px;
+  box-shadow: none;
+}
+
+.m-thr-detail .thr-form-row {
+  flex-wrap: wrap;
+}
+
+.m-thr-detail .thr-slot {
+  min-width: 0;
+  margin: 0 16px 6px 36px;
+}
+
+.m-thr-detail .thr-slot-btns button {
+  min-height: 40px;
+  padding: 0 12px;
+  font-size: 14px;
+}
+
+.m-thr-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 16px 0 36px;
+}
+
+.m-thr-actions .thr-btn {
+  min-height: 40px;
+  padding: 0 14px;
+  font-size: 14px;
+}
+
+/* The step editor in a sheet: no anchored chrome, thumb-sized buttons. */
+.thr-pop--sheet .thr-form-row {
+  flex-wrap: wrap;
+}
+
+.thr-pop--sheet .thr-btn {
+  min-height: 44px;
+  padding: 0 16px;
+  font-size: 15px;
+}
+
+/* Overrides of desktop selectors at phone width ---------------------------------- */
+@media (max-width: 640px) {
+  /* The document scrolls (so the browser chrome can collapse); the fixed bottom bar
+     reserves its height at the end of the page. */
+  .app-shell {
+    display: block;
+    height: auto;
+  }
+
+  .app-main {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+    padding-bottom: calc(var(--bar-total) + 16px);
+  }
+
+  /* iOS Safari zooms the page on focus into a field smaller than 16px and never
+     zooms back — every field on a phone is at least 16px. */
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+
+  .dev-card-title {
+    font-size: var(--fs-lead) !important;
+  }
+
+  /* Toasts sit above the bar, full width minus the gutters. */
+  .toast,
+  .toast.toast--threads,
+  .toast--capture {
+    top: auto;
+    left: 16px;
+    right: 16px;
+    bottom: calc(var(--bar-total) + 12px);
+    max-width: none;
+    transform: none;
+  }
+
+  .toast-undo,
+  .toast-dismiss {
+    min-height: 36px;
+    padding: 0 12px;
+  }
+
+  /* Threads tab: header row (title · + thread) with the filter chips on one
+     sideways-scrolling row beneath; no inner scroll box. */
+  .threads-panel--mobile {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .threads-panel--mobile .thr-ph {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    margin: 0;
+    padding: 12px 16px 2px;
+  }
+
+  .threads-panel--mobile .thr-ph h2 {
+    margin: 0;
+  }
+
+  .threads-panel--mobile .thr-sp {
+    display: none;
+  }
+
+  .threads-panel--mobile .thr-ph > .thr-btn--primary {
+    order: 2;
+    min-height: 36px;
+    margin-left: auto;
+    padding: 0 14px;
+    font-size: 14px;
+  }
+
+  .threads-panel--mobile .thr-fbar {
+    order: 3;
+    flex: 0 0 calc(100% + 32px);
+    flex-wrap: nowrap;
+    margin: 0 -16px;
+    padding: 4px 16px 8px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .threads-panel--mobile .thr-fbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .threads-panel--mobile .thr-fchip {
+    flex-shrink: 0;
+    min-height: 36px;
+    padding: 0 12px;
+    font-size: 13.5px;
+    white-space: nowrap;
+  }
+
+  .threads-panel--mobile .thr-body {
+    overflow: visible;
+  }
+
+  .threads-panel--mobile .thr-newrow {
+    padding: 0 16px 10px;
+  }
+
+  .threads-panel--mobile .thr-empty {
+    padding: 0 16px;
+  }
+
+  /* Scratch tab: like the desktop column — the panel fills the screen between the
+     sticky Home header (--m-head-h, measured by MobileHome) and the bottom bar; the
+     editor takes all the space above RECENT, which rests at header + 2 rows and
+     scrolls the rest. */
+  .capture-panel--mobile {
+    --recent-rest: calc(1.75rem + 2 * 48px);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    height: calc(
+      100dvh - var(--m-head-h, 160px) - var(--bar-total) - 16px
+    );
+    min-height: 360px;
+    padding: 12px 16px 0;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .capture-panel--mobile .panel-head {
+    margin: 0;
+  }
+
+  .capture-panel--mobile .capture-form {
+    flex: 1 1 0;
+    min-height: 0;
+    gap: 10px;
+    margin: 0;
+  }
+
+  .capture-panel--mobile .capture-input {
+    flex: 1 1 6rem;
+    min-height: 6rem;
+    padding: 12px 14px;
+    border-radius: 12px;
+    resize: none;
+  }
+
+  .capture-panel--mobile .capture-submit {
+    align-self: stretch;
+    min-height: 46px;
+    border: 0;
+    border-radius: 11px;
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .capture-panel--mobile .capture-submit:disabled {
+    opacity: 0.45;
+  }
+
+  .capture-panel--mobile .scratch-recent {
+    flex: 0 0 var(--recent-rest);
+    min-height: var(--recent-rest);
+    overflow-y: auto;
+  }
+
+  .capture-panel--mobile .scratch-entries li {
+    align-items: center;
+    gap: 8px;
+    min-height: 48px;
+    padding: 0;
+  }
+
+  .capture-panel--mobile .scratch-text {
+    font-size: 15px;
+  }
+
+  .capture-panel--mobile .scratch-copy {
+    width: 44px;
+    height: 44px;
+    font-size: 16px;
+  }
+
+  /* Settings: full-screen, one column. Above the bottom bar, under sheets. */
+  .settings-overlay {
+    z-index: 1200;
+    padding: 0;
+  }
+
+  .settings-modal {
+    min-height: 100dvh;
+    max-width: none;
+    padding: calc(12px + env(safe-area-inset-top)) 16px
+      calc(24px + env(safe-area-inset-bottom));
+    border: 0;
+    border-radius: 0;
+  }
+
+  .settings-close {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Dev: the header stacks, the lane tabs scroll sideways, cards go full width. */
+  .dev-view {
+    padding: 12px 16px 0;
+  }
+
+  .dev-header {
+    flex-wrap: wrap;
+  }
+
+  .dev-header h1 {
+    flex-basis: 100%;
+  }
+
+  .dev-header-meta {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .dev-config-btn,
+  .dev-scan-btn {
+    min-height: 44px;
+  }
+
+  .dev-tabs {
+    margin: 0 -16px 12px;
+    padding: 4px 16px 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .dev-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .dev-tab {
+    flex-shrink: 0;
+    min-height: 44px;
+    white-space: nowrap;
+  }
+
+  .dev-card {
+    padding: 12px;
+  }
+
+  .dev-card-controls {
+    flex-direction: column;
+  }
+
+  .dev-field select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .dev-card-foot {
+    flex-wrap: wrap;
+  }
+
+  .dev-card-foot button,
+  .dev-load-older {
+    min-height: 44px;
+  }
+
+  .dev-mention-menu {
+    left: 0;
+    right: 0;
+    min-width: 0;
+  }
+
+  .dev-config-drawer {
+    padding: 12px;
+  }
+
+  .dev-pat-input,
+  .dev-repo-desc {
+    width: 100%;
+    min-width: 0;
   }
 }

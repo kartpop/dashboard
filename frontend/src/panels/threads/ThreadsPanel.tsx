@@ -8,6 +8,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { Sheet } from "../../Sheet";
 import {
   LIST_LABEL,
   type ListKey,
@@ -650,6 +651,7 @@ function StepPopover({
   thread,
   step,
   anchor,
+  mobile,
   onPatch,
   onMarkDone,
   onDelete,
@@ -658,6 +660,8 @@ function StepPopover({
   thread: Thread;
   step: Step;
   anchor: DOMRect;
+  // Phone (goal 15): the same editor, in a bottom sheet instead of anchored.
+  mobile?: boolean;
   onPatch: (patch: StepPatch) => Promise<void>;
   onMarkDone: () => void;
   onDelete: () => void;
@@ -695,7 +699,7 @@ function StepPopover({
   // Place under the step (flip above if it would overflow the viewport).
   useLayoutEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el || mobile) return;
     const W = el.offsetWidth;
     const H = el.offsetHeight;
     const left = Math.max(
@@ -706,7 +710,7 @@ function StepPopover({
     if (top + H > window.innerHeight - 12)
       top = Math.max(12, anchor.top - H - 6);
     setPos({ left, top });
-  }, [anchor]);
+  }, [anchor, mobile]);
 
   // Only fields that differ from the step's current value are sent.
   function diff(): StepPatch {
@@ -738,6 +742,8 @@ function StepPopover({
     closeRef.current = close;
   });
   useEffect(() => {
+    // A sheet closes itself (scrim tap / Esc) through `close`.
+    if (mobile) return;
     function onDown(e: PointerEvent) {
       if (!ref.current?.contains(e.target as Node)) closeRef.current();
     }
@@ -752,20 +758,10 @@ function StepPopover({
       document.removeEventListener("pointerdown", onDown, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, []);
+  }, [mobile]);
 
-  return createPortal(
-    <div
-      ref={ref}
-      className="thr-pop"
-      role="dialog"
-      aria-label={isNext ? "Next step" : "Step"}
-      style={
-        pos
-          ? { left: pos.left, top: pos.top }
-          : { left: anchor.left, top: anchor.bottom + 6, visibility: "hidden" }
-      }
-    >
+  const body = (
+    <>
       <div className="thr-pk">
         {isNext ? "Next step" : "Step"} · {thread.title}
       </div>
@@ -857,6 +853,33 @@ function StepPopover({
           Close
         </button>
       </div>
+    </>
+  );
+
+  if (mobile)
+    return (
+      <Sheet
+        label={isNext ? "Next step" : "Step"}
+        onClose={close}
+        className="thr-pop--sheet"
+      >
+        {body}
+      </Sheet>
+    );
+
+  return createPortal(
+    <div
+      ref={ref}
+      className="thr-pop"
+      role="dialog"
+      aria-label={isNext ? "Next step" : "Step"}
+      style={
+        pos
+          ? { left: pos.left, top: pos.top }
+          : { left: anchor.left, top: anchor.bottom + 6, visibility: "hidden" }
+      }
+    >
+      {body}
     </div>,
     document.body,
   );
@@ -868,6 +891,7 @@ function ThreadMenu({
   thread,
   anchor,
   showAll,
+  mobile,
   onClose,
   onToggleAll,
   onLog,
@@ -877,6 +901,8 @@ function ThreadMenu({
   thread: Thread;
   anchor: DOMRect;
   showAll: boolean;
+  // Phone (goal 15): the same items, in a bottom sheet.
+  mobile?: boolean;
   onClose: () => void;
   onToggleAll: () => void;
   onLog: () => void;
@@ -889,6 +915,7 @@ function ThreadMenu({
     closeRef.current = onClose;
   });
   useEffect(() => {
+    if (mobile) return; // the sheet handles scrim taps + Esc
     function onDown(e: PointerEvent) {
       const t = e.target as Element;
       if (ref.current?.contains(t) || t.closest?.(".thr-more")) return;
@@ -905,23 +932,15 @@ function ThreadMenu({
       document.removeEventListener("pointerdown", onDown, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, []);
+  }, [mobile]);
 
   const act = (fn: () => void) => () => {
     onClose();
     fn();
   };
 
-  return createPortal(
-    <div
-      ref={ref}
-      className="task-menu-popover thr-menu"
-      role="menu"
-      style={{
-        top: anchor.bottom + 4,
-        left: Math.max(12, anchor.right - 170),
-      }}
-    >
+  const items = (
+    <>
       {thread.archived ? (
         <button
           type="button"
@@ -959,6 +978,30 @@ function ThreadMenu({
           </button>
         </>
       )}
+    </>
+  );
+
+  if (mobile)
+    return (
+      <Sheet label={`Options for ${thread.title}`} onClose={onClose}>
+        <h3 className="sheet-title">{thread.title}</h3>
+        <div className="sheet-list" role="menu">
+          {items}
+        </div>
+      </Sheet>
+    );
+
+  return createPortal(
+    <div
+      ref={ref}
+      className="task-menu-popover thr-menu"
+      role="menu"
+      style={{
+        top: anchor.bottom + 4,
+        left: Math.max(12, anchor.right - 170),
+      }}
+    >
+      {items}
     </div>,
     document.body,
   );
@@ -1123,6 +1166,227 @@ function DetailedRow({
   );
 }
 
+// ── Phone row (goal 15) ───────────────────────────────────────────────────────
+
+/** The soonest open step at phone width: ring + full text, pill on its own line. */
+function MobileStep({
+  step,
+  more,
+  onClick,
+}: {
+  step: Step;
+  more?: number;
+  onClick: (el: HTMLElement) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`m-thr-step m-thr-step--${step.list ?? "mine"}`}
+      onClick={(e) => onClick(e.currentTarget)}
+    >
+      <span className={`thr-ring thr-ring--${step.list ?? "mine"}`} />
+      <span className="m-thr-step-body">
+        <span className="m-thr-step-text">{step.label}</span>
+        <span className="m-thr-step-meta">
+          <DuePill step={step} />
+          {!!more && (
+            <span className="m-thr-more-steps">
+              +{more} step{more === 1 ? "" : "s"}
+            </span>
+          )}
+          {step.note && <NoteIcon />}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+/**
+ * A thread at phone width: two lines collapsed (title · age · ⋯, then the soonest
+ * open step in full), and a VERTICAL list expanded — open steps, the last few done
+ * steps (struck) with the "+N earlier" fold, then "+ next step" / "+ log update".
+ * Same data, forms and callbacks as the desktop Track; only the shape differs.
+ */
+function MobileThreadRow({
+  thread,
+  expanded,
+  flash,
+  showAll,
+  editing,
+  onToggle,
+  onMenu,
+  onToggleAll,
+  onOpenStep,
+  onStartLog,
+  onStartNext,
+  onSubmitLog,
+  onSubmitNext,
+  onCancelEdit,
+}: {
+  thread: Thread;
+  expanded: boolean;
+  flash: boolean;
+  showAll: boolean;
+  editing: Editing | null;
+  onToggle: () => void;
+  onMenu: (rect: DOMRect) => void;
+  onToggleAll: () => void;
+  onOpenStep: (step: Step, el: HTMLElement) => void;
+  onStartLog: () => void;
+  onStartNext: (list: ListKey) => void;
+  onSubmitLog: (label: string) => void;
+  onSubmitNext: (label: string, list: ListKey, due: string | null) => void;
+  onCancelEdit: () => void;
+}) {
+  const open = openOf(thread);
+  const n = open[0];
+  const done = thread.steps.filter((s) => s.kind === "done");
+  const last = done[done.length - 1];
+  const moved = daysBetween(thread.last_moved_on, istDayKey(0));
+
+  let body: ReactNode;
+  if (!expanded) {
+    if (n) {
+      body = <MobileStep step={n} more={open.length - 1} onClick={onToggle} />;
+    } else {
+      body = (
+        <button type="button" className="m-thr-step" onClick={onToggle}>
+          <span className="thr-ring thr-ring--none" />
+          <span className="m-thr-step-body">
+            {!thread.archived && (
+              <span className="thr-chip thr-chip--warn">Needs next step</span>
+            )}
+            <span className="m-thr-step-text m-thr-step-text--dim">
+              {last
+                ? `${thread.archived ? "" : "Last: "}${last.label}`
+                : "No steps yet"}
+            </span>
+          </span>
+        </button>
+      );
+    }
+  } else {
+    // Newest done first, folding all but the last SHOW_DONE.
+    const recent = [...done].reverse();
+    const hidden = showAll ? 0 : Math.max(0, recent.length - SHOW_DONE);
+    const shownDone = hidden ? recent.slice(0, SHOW_DONE) : recent;
+    const nextForm =
+      editing?.mode === "next" ? (
+        <NextForm
+          initialList={editing.list}
+          initialDue={editing.due}
+          onSubmit={onSubmitNext}
+          onCancel={onCancelEdit}
+        />
+      ) : null;
+    body = (
+      <div className="m-thr-detail">
+        {open.map((s) => (
+          <MobileStep key={s.id} step={s} onClick={(el) => onOpenStep(s, el)} />
+        ))}
+        {nextForm}
+        {!n && !editing && !thread.archived && (
+          <div className="thr-slot">
+            <div className="thr-slot-q">
+              What’s next?
+              {done.length === 0 && (
+                <span> Log what’s happened so far, or set a next step.</span>
+              )}
+            </div>
+            <div className="thr-slot-btns">
+              <button
+                type="button"
+                className="thr-slot-mine"
+                onClick={() => onStartNext("mine")}
+              >
+                + My task
+              </button>
+              <button
+                type="button"
+                className="thr-slot-follow"
+                onClick={() => onStartNext("follow")}
+              >
+                + Follow-up
+              </button>
+              <button type="button" onClick={onStartLog}>
+                Log update
+              </button>
+            </div>
+          </div>
+        )}
+        {editing?.mode === "log" && (
+          <LogForm onSubmit={onSubmitLog} onCancel={onCancelEdit} />
+        )}
+        {shownDone.map((s) => (
+          <button
+            key={s.id}
+            type="button"
+            className="m-thr-done"
+            onClick={(e) => onOpenStep(s, e.currentTarget)}
+          >
+            <span className="thr-dot" />
+            <span className="m-thr-done-text">
+              <s>{s.label}</s>
+              <span className="m-thr-done-date">
+                {s.occurred_on ? shortDate(s.occurred_on) : ""}
+                {s.via && ` · via ${LIST_LABEL[s.via]}`}
+              </span>
+            </span>
+            {s.note && <NoteIcon />}
+          </button>
+        ))}
+        {(hidden > 0 || (showAll && done.length > SHOW_DONE)) && (
+          <button type="button" className="thr-earlier" onClick={onToggleAll}>
+            {hidden ? `+${hidden} earlier` : "‹ fewer"}
+          </button>
+        )}
+        {n && !editing && !thread.archived && (
+          <div className="m-thr-actions">
+            <button
+              type="button"
+              className="thr-btn"
+              onClick={() => onStartNext(open[open.length - 1]?.list ?? "mine")}
+            >
+              + next step
+            </button>
+            <button type="button" className="thr-btn" onClick={onStartLog}>
+              + log update
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      id={`thread-row-${thread.id}`}
+      className={`m-thr${expanded ? " m-thr--open" : ""}${thread.archived ? " thr-archived" : ""}${flash ? " thr-flash" : ""}`}
+    >
+      <div className="m-thr-head">
+        <button
+          type="button"
+          className="m-thr-main"
+          aria-expanded={expanded}
+          onClick={onToggle}
+        >
+          <span className={`thr-caret${expanded ? " thr-caret--open" : ""}`}>
+            ›
+          </span>
+          <span className="m-thr-title">{thread.title}</span>
+          <span
+            className={`m-thr-age${moved >= STALE_DAYS ? " thr-stale" : ""}`}
+          >
+            {moved <= 0 ? "today" : `${moved}d`}
+          </span>
+        </button>
+        <MoreButton thread={thread} onOpen={onMenu} />
+      </div>
+      {body}
+    </div>
+  );
+}
+
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -1130,9 +1394,19 @@ function DetailedRow({
  * which rows are open, forms, popover) lives here; data + writes live in the
  * lifted `useThreadsPanel` owned by DashboardPage.
  */
-export function ThreadsPanel({ threads }: { threads: ThreadsHook }) {
+export function ThreadsPanel({
+  threads,
+  mobile,
+}: {
+  threads: ThreadsHook;
+  // Phone (goal 15): two-line rows that expand into a vertical list, popovers in
+  // sheets, no view toggle (always the compact list), refresh moved to the Home
+  // header.
+  mobile?: boolean;
+}) {
   const [filter, setFilter] = useState<Filter>("all");
-  const [view, setView] = useState<View>(readView);
+  const [savedView, setView] = useState<View>(readView);
+  const view: View = mobile ? "compact" : savedView;
   const [open, setOpen] = useState<Set<number>>(() => new Set());
   const [showAll, setShowAll] = useState<Set<number>>(() => new Set());
   const [editing, setEditing] = useState<Editing | null>(null);
@@ -1262,6 +1536,48 @@ export function ThreadsPanel({ threads }: { threads: ThreadsHook }) {
     const isFlash = flash?.id === t.id;
     const menuOpen = (rect: DOMRect) =>
       setMenu({ threadId: t.id, anchor: rect });
+    if (mobile) {
+      return (
+        <MobileThreadRow
+          key={t.id}
+          thread={t}
+          expanded={open.has(t.id) || !!editingHere}
+          flash={isFlash}
+          showAll={showAll.has(t.id)}
+          editing={editingHere}
+          onToggle={() => toggleOpen(t.id)}
+          onMenu={menuOpen}
+          onToggleAll={() => toggleAll(t.id)}
+          onOpenStep={(s, el) =>
+            setPop({
+              threadId: t.id,
+              stepId: s.id,
+              anchor: el.getBoundingClientRect(),
+            })
+          }
+          onStartLog={() => startEdit({ threadId: t.id, mode: "log" })}
+          onStartNext={(l) =>
+            startEdit({ threadId: t.id, mode: "next", list: l })
+          }
+          onSubmitLog={(label) => {
+            setEditing(null);
+            threads.logStep(t.id, label);
+            setFlash({ id: t.id, nonce: Date.now() });
+          }}
+          onSubmitNext={(label, l, due) => {
+            setEditing({
+              threadId: t.id,
+              mode: "next",
+              list: l,
+              due: due ?? undefined,
+            });
+            threads.setNextStep(t.id, label, l, due, due ? dueText(due) : "");
+            setFlash({ id: t.id, nonce: Date.now() });
+          }}
+          onCancelEdit={() => setEditing(null)}
+        />
+      );
+    }
     if (view === "compact" && !open.has(t.id) && !editingHere) {
       return (
         <CompactRow
@@ -1371,7 +1687,9 @@ export function ThreadsPanel({ threads }: { threads: ThreadsHook }) {
     );
 
   return (
-    <section className="panel threads-panel">
+    <section
+      className={`panel threads-panel${mobile ? " threads-panel--mobile" : ""}`}
+    >
       <div className="panel-head thr-ph">
         <h2>Threads</h2>
         <div className="thr-fbar" role="group" aria-label="Filter threads">
@@ -1392,28 +1710,34 @@ export function ThreadsPanel({ threads }: { threads: ThreadsHook }) {
           ))}
         </div>
         <span className="thr-sp" />
-        <span className="thr-seg thr-seg--view" role="group" aria-label="View">
-          <button
-            type="button"
-            className={view === "compact" ? "on" : ""}
-            aria-pressed={view === "compact"}
-            title="Compact: one line per thread"
-            aria-label="Compact view"
-            onClick={() => chooseView("compact")}
+        {!mobile && (
+          <span
+            className="thr-seg thr-seg--view"
+            role="group"
+            aria-label="View"
           >
-            <CompactIcon />
-          </button>
-          <button
-            type="button"
-            className={view === "detailed" ? "on" : ""}
-            aria-pressed={view === "detailed"}
-            title="Detailed: full step track"
-            aria-label="Detailed view"
-            onClick={() => chooseView("detailed")}
-          >
-            <DetailedIcon />
-          </button>
-        </span>
+            <button
+              type="button"
+              className={view === "compact" ? "on" : ""}
+              aria-pressed={view === "compact"}
+              title="Compact: one line per thread"
+              aria-label="Compact view"
+              onClick={() => chooseView("compact")}
+            >
+              <CompactIcon />
+            </button>
+            <button
+              type="button"
+              className={view === "detailed" ? "on" : ""}
+              aria-pressed={view === "detailed"}
+              title="Detailed: full step track"
+              aria-label="Detailed view"
+              onClick={() => chooseView("detailed")}
+            >
+              <DetailedIcon />
+            </button>
+          </span>
+        )}
         <button
           type="button"
           className="thr-btn thr-btn--primary"
@@ -1425,15 +1749,17 @@ export function ThreadsPanel({ threads }: { threads: ThreadsHook }) {
         >
           + thread
         </button>
-        <button
-          type="button"
-          className="panel-refresh"
-          aria-label="refresh threads"
-          title="Refresh"
-          onClick={threads.refresh}
-        >
-          ⟳
-        </button>
+        {!mobile && (
+          <button
+            type="button"
+            className="panel-refresh"
+            aria-label="refresh threads"
+            title="Refresh"
+            onClick={threads.refresh}
+          >
+            ⟳
+          </button>
+        )}
       </div>
       <div className="thr-body">{body}</div>
 
@@ -1443,6 +1769,7 @@ export function ThreadsPanel({ threads }: { threads: ThreadsHook }) {
           thread={popThread}
           step={popStep}
           anchor={pop.anchor}
+          mobile={mobile}
           onPatch={(patch) =>
             threads.updateStep(popThread.id, popStep.id, patch)
           }
@@ -1462,6 +1789,7 @@ export function ThreadsPanel({ threads }: { threads: ThreadsHook }) {
           thread={menuThread}
           anchor={menu.anchor}
           showAll={showAll.has(menuThread.id)}
+          mobile={mobile}
           onClose={() => setMenu(null)}
           onToggleAll={() => {
             toggleAll(menuThread.id);

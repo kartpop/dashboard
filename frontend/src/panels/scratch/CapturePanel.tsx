@@ -6,12 +6,8 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import type {
-  ReviewFields,
-  RouterClassification,
-  ScratchEntry,
-} from "./useScratchPanel";
-import { useScratchPanel } from "./useScratchPanel";
+import type { ReviewFields, ScratchEntry } from "./useScratchPanel";
+import type { CaptureHook } from "./useCapture";
 import { ReviewQueue } from "./ReviewPanel";
 import {
   handleEnter,
@@ -47,17 +43,23 @@ function noteChipTitle(path: string | null): string {
   return path ? path.split("/").join(" / ") : "Dashboard — Notes";
 }
 
-// Capture files the whole editor, but the POST is HELD this long so an
-// accidental capture is recoverable with one click (undo-by-never-sending — a
-// mirror of the g4a deferred-delete). Undo fires zero backend writes.
-const CAPTURE_UNDO_MS = 5000;
-
-// `onRouted` lets the (separately-owned) Tasks panel refresh when routing or a
-// review confirmation created a Google task — the panels share no state.
-export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
-  const scratch = useScratchPanel();
+// `capture` is the lifted scratch data + deferred-capture path (goal 15: owned by
+// AppShell so the quick-capture sheet shares it). `onRouted` lets the
+// (separately-owned) Tasks panel refresh when routing or a review confirmation
+// created a Google task — the panels share no state. `mobile` drops the
+// editor/RECENT drag split (the phone's Scratch tab fills the screen with the editor
+// over a 2-row RECENT, the desktop column's rest sizing — see index.css).
+export function CapturePanel({
+  capture,
+  onRouted,
+  mobile,
+}: {
+  capture: CaptureHook;
+  onRouted?: () => void;
+  mobile?: boolean;
+}) {
+  const { scratch, captureError } = capture;
   const [text, setText] = useState("");
-  const [captureError, setCaptureError] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   // A bullet keystroke sets both value and caret; the textarea is controlled, so
   // stash the desired selection and re-apply it once React has flushed the value.
@@ -114,109 +116,20 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
     setText(next.value);
   };
 
-  // ── Deferred-capture undo toast (goal 7a) ─────────────────────────────────
-  // Shift+Enter clears the editor immediately but HOLDS the POST for ~5s behind
-  // an "Undo" toast. The held text lives in a ref (survives re-renders); the
-  // capture fn is read through a ref so the commit/flush closures stay stable and
-  // an unmount can flush without re-firing on every render.
-  const [showUndo, setShowUndo] = useState(false);
-  const pendingRef = useRef<string | null>(null);
-  // The classifier runs the instant a capture is queued (see `submit`), so the LLM
-  // works through the ~5s undo window rather than after it — the toast hides its
-  // latency. The in-flight proposal rides in a ref alongside the held text; undo
-  // just drops it (the classify call has no side effects), commit hands it to the
-  // POST so routing skips a second LLM call.
-  const pendingClassifyRef =
-    useRef<Promise<RouterClassification | null> | null>(null);
-  const timerRef = useRef<number | null>(null);
-  const captureFnRef = useRef(scratch.capture);
-  const classifyFnRef = useRef(scratch.classify);
-  const onRoutedRef = useRef(onRouted);
-  useEffect(() => {
-    captureFnRef.current = scratch.capture;
-    classifyFnRef.current = scratch.classify;
-    onRoutedRef.current = onRouted;
-  });
-
-  // Restore held text into the editor: prepend above anything the user typed
-  // during the window (blank line between), else just set it. Zero writes.
+  // Restore held text into the editor (Undo, or a failed POST): prepend above
+  // anything the user typed during the window (blank line between), else just set
+  // it. Zero writes.
   const restoreHeld = useCallback((held: string) => {
     setText((cur) => (cur.trim() ? `${held}\n\n${cur}` : held));
   }, []);
 
-  // Send the still-held capture (window lapsed, or a new capture supersedes it —
-  // one toast at a time). A POST failure surfaces the error and restores the text.
-  const commitPending = useCallback(async () => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    const held = pendingRef.current;
-    const classifyP = pendingClassifyRef.current;
-    pendingRef.current = null;
-    pendingClassifyRef.current = null;
-    setShowUndo(false);
-    if (held === null) return;
-    try {
-      // Await the classification kicked off at submit (already done, or nearly, by
-      // now — it ran through the undo window). Its POST then routes inline (goal 7c)
-      // without a second LLM call; if it filed a Google task, refresh the
-      // (separately-owned) Tasks panel so it appears without a scheduler tick.
-      const classification = classifyP ? await classifyP : null;
-      const created = await captureFnRef.current(held, classification);
-      setCaptureError(null);
-      if (created?.routing_state === "routed_task") onRoutedRef.current?.();
-    } catch (err) {
-      setCaptureError((err as Error).message);
-      restoreHeld(held);
-    }
-  }, [restoreHeld]);
-
-  // Capture the WHOLE editor as one entry, verbatim — but defer the write. Clear
-  // the editor now; the POST fires only once the undo window closes. Fired by the
-  // Capture button and the Cmd/Ctrl+Enter secondary — never by a single keystroke.
+  // Capture the WHOLE editor as one entry, verbatim — but defer the write (the
+  // shared path in useCapture). Clear the editor now; the POST fires only once the
+  // undo window closes. Fired by the Capture button and the Cmd/Ctrl+Enter
+  // secondary — never by a single keystroke.
   const submit = () => {
-    if (!text.trim()) return;
-    void commitPending(); // flush any previous still-held capture first
-    pendingRef.current = text;
-    // Kick the classifier off NOW so it runs during the undo window, not after it.
-    // Swallow failures to null — commit then sends no classification and the backend
-    // classifies inline (old behaviour), so a classify hiccup never blocks a capture.
-    pendingClassifyRef.current = classifyFnRef.current(text).catch(() => null);
-    setText("");
-    setCaptureError(null);
-    setShowUndo(true);
-    timerRef.current = window.setTimeout(() => {
-      timerRef.current = null;
-      void commitPending();
-    }, CAPTURE_UNDO_MS);
+    if (capture.submit(text, restoreHeld)) setText("");
   };
-
-  // Undo: cancel the held POST and restore the text — never sends anything.
-  const undoCapture = () => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    const held = pendingRef.current;
-    pendingRef.current = null;
-    // Drop the in-flight classification — it has no side effects, so an unresolved
-    // classify call just gets ignored; nothing was persisted or written.
-    pendingClassifyRef.current = null;
-    setShowUndo(false);
-    if (held !== null) restoreHeld(held);
-  };
-
-  // On unmount, flush a still-held capture so it is never silently lost (fire the
-  // POST directly, no state updates on a gone component).
-  useEffect(() => {
-    return () => {
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-      const held = pendingRef.current;
-      pendingRef.current = null;
-      if (held && held.trim()) void captureFnRef.current(held).catch(() => {});
-    };
-  }, []);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const ta = e.currentTarget;
@@ -288,7 +201,10 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
   );
 
   return (
-    <section className="panel capture-panel" ref={panelRef}>
+    <section
+      className={`panel capture-panel${mobile ? " capture-panel--mobile" : ""}`}
+      ref={panelRef}
+    >
       <div className="panel-head">
         <h2>Scratchpad</h2>
       </div>
@@ -304,8 +220,12 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
           ref={taRef}
           className="capture-input"
           value={text}
-          placeholder="Dump a thought: `- ` starts a bullet, Capture button (or ⌘/Ctrl+Enter) files it…"
-          rows={12}
+          placeholder={
+            mobile
+              ? "Dump a thought. `- ` starts a bullet; Capture files it…"
+              : "Dump a thought: `- ` starts a bullet, Capture button (or ⌘/Ctrl+Enter) files it…"
+          }
+          rows={mobile ? 6 : 12}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
         />
@@ -330,14 +250,16 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
         onDismiss={scratch.dismissItem}
       />
 
-      <div
-        className="scratch-resize-handle"
-        onMouseDown={handleResizeStart}
-        role="separator"
-        aria-label="Resize editor and recent sections"
-      >
-        <div className="scratch-resize-bar" />
-      </div>
+      {!mobile && (
+        <div
+          className="scratch-resize-handle"
+          onMouseDown={handleResizeStart}
+          role="separator"
+          aria-label="Resize editor and recent sections"
+        >
+          <div className="scratch-resize-bar" />
+        </div>
+      )}
 
       <div className="scratch-recent">
         <div className="scratch-recent-head">
@@ -392,17 +314,24 @@ export function CapturePanel({ onRouted }: { onRouted?: () => void }) {
           </ul>
         )}
       </div>
-
-      {showUndo &&
-        createPortal(
-          <div className="toast toast--action toast--capture" role="status">
-            <span>Captured — filing in a moment…</span>
-            <button className="toast-undo" onClick={undoCapture}>
-              Undo
-            </button>
-          </div>,
-          document.body,
-        )}
     </section>
+  );
+}
+
+/**
+ * The deferred-capture Undo toast. Rendered once by AppShell (it owns the capture
+ * state) so it shows whichever surface captured — the Scratch editor or the quick-
+ * capture sheet — and from any view.
+ */
+export function CaptureUndoToast({ capture }: { capture: CaptureHook }) {
+  if (!capture.showUndo) return null;
+  return createPortal(
+    <div className="toast toast--action toast--capture" role="status">
+      <span>Captured — filing in a moment…</span>
+      <button className="toast-undo" onClick={capture.undo}>
+        Undo
+      </button>
+    </div>,
+    document.body,
   );
 }

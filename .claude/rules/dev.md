@@ -224,3 +224,12 @@ the switch that keeps the opus call from firing for users who don't use the feat
 - `scheduler.py` — in-process asyncio loop (same pattern as news/router), end-of-day
   daily, gated per-user on the `dev` flag + config-complete before any creds/Doc/LLM work.
 - `routers/dev.py` — HTTP surface, every endpoint behind `require_dev_enabled`.
+
+## Phone layout (goal 15)
+
+CSS only, in the `@media (max-width: 640px)` block of `index.css`: the header stacks (title row,
+then last-run · Config · Create now wrapping), `.dev-tabs` scroll sideways on one row (still
+sticky), cards go full width with single-column controls (selects 100% wide), foot buttons wrap
+and are ≥44px, and `.dev-mention-menu` spans the textarea width so it never runs off-screen. The
+page scrolls (not `.app-main`), so the review lane's IntersectionObserver sentinel (viewport root)
+keeps working unchanged. No sheets were needed in Dev.

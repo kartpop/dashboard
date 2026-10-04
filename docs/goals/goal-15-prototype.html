@@ -1,0 +1,501 @@
+<title>Dashboard on Mobile</title>
+<style>
+/* Layout: phone mock (sticky, left) beside the decision list (right); stacks at phone width. */
+:root{
+  --bg:#f4f3f1; --panel:#fff; --text:#3f3d44; --text-h:#08060d; --muted:#8b8893; --faint:#b9b6be;
+  --border:#e5e4e7; --muted-bg:#f7f6f4; --line:#d6d4d9;
+  --mine:#047857; --follow:#a16207; --warn:#c0392b; --accent:#2563eb;
+  --mine-bg:color-mix(in srgb,var(--mine) 11%,transparent);
+  --follow-bg:color-mix(in srgb,var(--follow) 13%,transparent);
+  --warn-bg:color-mix(in srgb,var(--warn) 10%,transparent);
+  --accent-bg:color-mix(in srgb,var(--accent) 11%,transparent);
+  --brand:#e8792b;
+  --bezel:#1b1a1f; --scrim:rgba(10,8,16,.38);
+  --shadow:0 18px 50px rgba(20,18,30,.18),0 2px 6px rgba(20,18,30,.08);
+  --sheet-shadow:0 -10px 30px rgba(20,18,30,.16);
+  --ui:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --mono:ui-monospace,'SF Mono',Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1014; --panel:#16171d; --text:#d1d3d8; --text-h:#f3f4f6; --muted:#8d909a; --faint:#555866;
+    --border:#2e303a; --muted-bg:#1f2028; --line:#3a3c47;
+    --mine:#5cc8a8; --follow:#e0b050; --warn:#ff7b6b; --accent:#7aa2f7;
+    --bezel:#000; --scrim:rgba(0,0,0,.55);
+    --shadow:0 18px 50px rgba(0,0,0,.6); --sheet-shadow:0 -10px 30px rgba(0,0,0,.5);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1014; --panel:#16171d; --text:#d1d3d8; --text-h:#f3f4f6; --muted:#8d909a; --faint:#555866;
+  --border:#2e303a; --muted-bg:#1f2028; --line:#3a3c47;
+  --mine:#5cc8a8; --follow:#e0b050; --warn:#ff7b6b; --accent:#7aa2f7;
+  --bezel:#000; --scrim:rgba(0,0,0,.55);
+  --shadow:0 18px 50px rgba(0,0,0,.6); --sheet-shadow:0 -10px 30px rgba(0,0,0,.5);
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font:14px/1.45 var(--ui)}
+button{font:inherit;color:inherit;cursor:pointer;background:none;border:0;padding:0}
+textarea,input{font:inherit;color:var(--text-h)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ── page chrome ───────────────────────────────────────────── */
+.page{max-width:1180px;margin:0 auto;padding-inline:24px;padding-block:28px 48px;display:grid;grid-template-columns:auto minmax(0,1fr);gap:40px;align-items:start}
+.stage{position:sticky;top:20px;display:flex;flex-direction:column;align-items:center;gap:14px}
+.stage-ctl{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:999px;background:var(--panel);padding:2px}
+.seg button{padding:5px 12px;border-radius:999px;font-size:12.5px;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--text-h);color:var(--panel)}
+.seg-label{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);align-self:center}
+
+.notes{min-width:0;display:flex;flex-direction:column;gap:22px}
+.notes h1{font-size:26px;line-height:1.2;margin:0;color:var(--text-h);text-wrap:balance;font-weight:650}
+.lede{margin:0;max-width:62ch;color:var(--text)}
+.bugs{background:var(--warn-bg);border-radius:10px;padding:12px 16px}
+.bugs h2,.dec h2{font-size:11px;letter-spacing:.07em;text-transform:uppercase;margin:0 0 6px;color:var(--muted);font-weight:600}
+.bugs h2{color:var(--warn)}
+.bugs ul{margin:0;padding-left:18px;display:grid;gap:3px}
+.dec-list{display:grid;gap:12px}
+.dec{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px;display:grid;gap:6px}
+.dec-head{display:flex;gap:10px;align-items:baseline}
+.dec-id{font:600 12px var(--mono);color:var(--accent)}
+.dec h3{margin:0;font-size:15.5px;color:var(--text-h);font-weight:620}
+.dec p{margin:0;max-width:66ch}
+.dec .alt{color:var(--muted);font-size:13px}
+.dec .alt b{color:var(--text);font-weight:600}
+.try{font-size:12.5px;color:var(--accent);justify-self:start;border-bottom:1px dashed currentColor}
+.open{border-style:dashed}
+.scope{font-size:13px;color:var(--muted);max-width:66ch}
+
+/* ── phone ─────────────────────────────────────────────────── */
+.phone{width:390px;height:800px;border-radius:52px;background:var(--bezel);padding:12px;box-shadow:var(--shadow)}
+.screen{position:relative;height:100%;border-radius:41px;overflow:hidden;background:var(--panel);display:flex;flex-direction:column;container-type:inline-size}
+.statusbar{flex:0 0 auto;height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 26px 0 32px;font-size:14px;font-weight:600;color:var(--text-h)}
+.statusbar i{font-style:normal;font-size:11px;letter-spacing:1px}
+.urlbar{flex:0 0 auto;margin:0 12px 6px;height:36px;border-radius:12px;background:var(--muted-bg);display:grid;place-items:center;font-size:14px;color:var(--text-h)}
+
+.app{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;position:relative;scrollbar-width:none}
+.app::-webkit-scrollbar{display:none}
+
+/* app header */
+.ahead{position:sticky;top:0;z-index:5;background:var(--panel);padding:8px 16px 0;border-bottom:1px solid transparent}
+.ahead.scrolled{border-bottom-color:var(--border)}
+.arow{display:flex;align-items:center;gap:10px;height:40px}
+.logo{width:28px;height:28px;flex:0 0 auto}
+.day{display:flex;align-items:center;gap:2px;font-weight:620;color:var(--text-h);font-size:16px}
+.day button{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:var(--muted)}
+.icon-btn{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;color:var(--muted);margin-left:auto}
+.icon-btn svg,.day svg{width:18px;height:18px}
+
+/* agenda strip */
+.agenda{display:flex;gap:8px;overflow-x:auto;padding:8px 16px 10px;margin:0 -16px;scrollbar-width:none;scroll-snap-type:x proximity}
+.agenda::-webkit-scrollbar{display:none}
+.ev{flex:0 0 auto;scroll-snap-align:start;border:1px solid var(--border);border-radius:10px;padding:5px 10px;font-size:12.5px;line-height:1.25;max-width:170px;text-align:left}
+.ev b{display:block;font:600 11px var(--ui);color:var(--muted);font-variant-numeric:tabular-nums}
+.ev span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-h)}
+.ev.past{opacity:.45}
+.ev.next{border-color:var(--accent);background:var(--accent-bg)}
+.ev.next b{color:var(--accent)}
+.now{flex:0 0 auto;align-self:stretch;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--warn);font:600 10.5px var(--ui);font-variant-numeric:tabular-nums}
+.now::before{content:"";width:2px;flex:1;background:var(--warn);border-radius:2px}
+
+/* section tabs */
+.tabs{display:flex;gap:4px;margin:0 -16px;padding:0 12px;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{flex:1 0 auto;padding:10px 8px 9px;font-size:13.5px;color:var(--muted);border-bottom:2px solid transparent;white-space:nowrap;display:flex;gap:5px;justify-content:center;align-items:baseline}
+.tab small{font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}
+.tab[aria-selected="true"]{color:var(--text-h);border-bottom-color:var(--text-h);font-weight:600}
+.tab[aria-selected="true"] small{color:var(--muted)}
+
+.body{padding:4px 0 96px}
+.sec-head{display:flex;align-items:center;gap:8px;padding:16px 16px 6px}
+.sec-head h2{margin:0;font-size:17px;color:var(--text-h);font-weight:640}
+.sec-head .cnt{font-size:12px;color:var(--muted)}
+.sec-head .icon-btn{width:32px;height:32px}
+.collapse{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:14px 16px;border-top:8px solid var(--muted-bg)}
+.collapse h2{margin:0;font-size:16px;color:var(--text-h);font-weight:640}
+.collapse .cnt{font-size:12px;color:var(--muted)}
+.collapse .chev{margin-left:auto;color:var(--muted);transition:transform .15s}
+.collapse[aria-expanded="true"] .chev{transform:rotate(90deg)}
+
+/* add row */
+.addrow{display:flex;align-items:center;gap:10px;margin:4px 16px 8px;padding:0 12px;height:42px;border-radius:10px;background:var(--muted-bg);color:var(--muted)}
+.addrow input{flex:1;min-width:0;border:0;background:none;outline:none;font-size:15px}
+.addrow input::placeholder{color:var(--muted)}
+
+/* buckets + task rows */
+.bucket{font:600 11.5px var(--ui);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:12px 16px 6px;display:flex;justify-content:space-between}
+.bucket.today{background:var(--mine-bg);color:var(--mine)}
+.bucket.tom{background:var(--follow-bg);color:var(--follow)}
+.bucket span:last-child{font-weight:500;letter-spacing:.02em;text-transform:none}
+.task{display:grid;grid-template-columns:44px minmax(0,1fr) 44px;align-items:start;min-height:52px;border-bottom:1px solid var(--border)}
+.task:last-child{border-bottom:0}
+.chk{width:44px;height:52px;display:grid;place-items:center}
+.chk i{width:22px;height:22px;border-radius:7px;border:1.6px solid var(--line);display:grid;place-items:center;transition:background .12s,border-color .12s}
+.task.done .chk i{background:var(--mine);border-color:var(--mine)}
+.chk i svg{width:13px;height:13px;color:var(--panel);opacity:0}
+.task.done .chk i svg{opacity:1}
+.tmain{padding:14px 0 12px;min-width:0;display:grid;gap:5px;text-align:left}
+.ttitle{color:var(--text-h);font-size:15.5px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.task.done .ttitle{color:var(--done,var(--faint));text-decoration:line-through}
+.tmeta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--muted)}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);color:var(--accent);border-radius:999px;padding:1px 8px 1px 6px;font-size:12px;line-height:18px;max-width:100%}
+.chip svg{width:14px;height:8px;flex:0 0 auto}
+.more{width:44px;height:52px;display:grid;place-items:center;color:var(--muted)}
+.more svg{width:18px;height:18px}
+.grp{font-size:12.5px;color:var(--muted);padding:8px 16px 10px 60px}
+
+/* threads */
+.filters{display:flex;gap:6px;overflow-x:auto;padding:4px 16px 10px;scrollbar-width:none}
+.filters::-webkit-scrollbar{display:none}
+.fchip{flex:0 0 auto;border:1px solid var(--border);border-radius:999px;padding:5px 12px;font-size:13px;color:var(--muted);display:flex;gap:6px;align-items:baseline}
+.fchip small{font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}
+.fchip[aria-pressed="true"]{background:var(--text-h);border-color:var(--text-h);color:var(--panel)}
+.fchip[aria-pressed="true"] small{color:color-mix(in srgb,var(--panel) 70%,transparent)}
+.thr{border-top:1px solid var(--border)}
+.thr-head{display:grid;grid-template-columns:28px minmax(0,1fr) auto 44px;align-items:center;width:100%;text-align:left;padding-left:8px}
+.thr-head .caret{color:var(--faint);transition:transform .15s;display:grid;place-items:center}
+.thr-head .caret svg{width:14px;height:14px}
+.thr.open .caret{transform:rotate(90deg)}
+.thr-title{font-weight:620;color:var(--text-h);font-size:15.5px;padding:12px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.age{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;padding-top:10px}
+.thr .more{height:44px}
+.step{display:grid;grid-template-columns:28px minmax(0,1fr);padding:0 16px 12px 8px;gap:0}
+.dot{width:11px;height:11px;border-radius:50%;border:2.2px solid var(--follow);margin:5px auto 0}
+.dot.mine{border-color:var(--mine)}
+.dot.done{background:var(--faint);border-color:var(--faint)}
+.step-body{display:grid;gap:6px;min-width:0}
+.step-text{color:var(--text);font-size:14.5px;line-height:1.4;overflow-wrap:anywhere}
+.step-meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.pill{border-radius:6px;padding:2px 8px;font-size:12px;font-weight:600;line-height:18px}
+.pill.mine{background:var(--mine-bg);color:var(--mine)}
+.pill.follow{background:var(--follow-bg);color:var(--follow)}
+.plus{font-size:12px;color:var(--muted)}
+.thr-detail{padding:0 16px 14px 36px;display:grid;gap:10px}
+.thr-detail .step{padding:0;grid-template-columns:20px minmax(0,1fr)}
+.hist{font-size:13px;color:var(--muted);display:grid;grid-template-columns:20px minmax(0,1fr);gap:0}
+.hist s{text-decoration-color:var(--faint)}
+.thr-actions{display:flex;gap:8px;flex-wrap:wrap}
+.ghost{border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px;color:var(--text-h)}
+.solid{background:var(--text-h);color:var(--panel);border-radius:9px;padding:7px 12px;font-size:13.5px;font-weight:600}
+
+/* scratchpad */
+.scratch{padding:4px 16px 0;display:grid;gap:10px}
+.scratch textarea{width:100%;min-height:150px;resize:none;border:1px solid var(--border);border-radius:12px;background:var(--panel);padding:12px 14px;font:14.5px/1.5 var(--mono);color:var(--text-h);outline:none}
+.scratch textarea:focus{border-color:var(--accent)}
+.scratch textarea::placeholder{color:var(--faint)}
+.capture{height:44px;border-radius:11px;background:var(--accent);color:#fff;font-weight:600;font-size:15px}
+.capture:disabled{opacity:.45}
+.recent-h{font:600 11.5px var(--ui);letter-spacing:.07em;text-transform:uppercase;color:var(--muted);padding-top:8px}
+.recent{display:grid}
+.rec{display:flex;align-items:center;gap:10px;min-height:48px;border-bottom:1px solid var(--border)}
+.rec span{flex:1;min-width:0;color:var(--text-h);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tag{border:1px solid color-mix(in srgb,var(--mine) 45%,transparent);color:var(--mine);border-radius:999px;font-size:12px;padding:2px 10px}
+
+/* bottom nav */
+.bnav{position:absolute;left:0;right:0;bottom:0;z-index:20;background:color-mix(in srgb,var(--panel) 92%,transparent);backdrop-filter:blur(12px);border-top:1px solid var(--border);display:grid;grid-template-columns:repeat(5,1fr);padding:6px 6px 22px}
+.bnav button{display:flex;flex-direction:column;align-items:center;gap:2px;font-size:10.5px;color:var(--muted);padding:4px 0}
+.bnav svg{width:22px;height:22px}
+.bnav [aria-current="page"]{color:var(--text-h);font-weight:600}
+.bnav .fab span{width:44px;height:44px;border-radius:14px;background:var(--text-h);color:var(--panel);display:grid;place-items:center;margin-top:-2px}
+
+/* sheets */
+.scrim{position:absolute;inset:0;z-index:30;background:var(--scrim);opacity:0;pointer-events:none;transition:opacity .18s}
+.scrim.on{opacity:1;pointer-events:auto}
+.sheet{position:absolute;left:0;right:0;bottom:0;z-index:31;background:var(--panel);border-radius:18px 18px 0 0;box-shadow:var(--sheet-shadow);padding:8px 16px 30px;transform:translateY(105%);transition:transform .22s cubic-bezier(.2,.8,.2,1);display:grid;gap:12px;max-height:85%;overflow-y:auto}
+.sheet.on{transform:none}
+.grab{width:36px;height:5px;border-radius:3px;background:var(--line);justify-self:center}
+.sheet h3{margin:0;font-size:16px;color:var(--text-h);font-weight:620;line-height:1.35}
+.sheet .sub{font-size:12.5px;color:var(--muted);margin-top:-8px}
+.quick{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.quick button{border:1px solid var(--border);border-radius:10px;padding:9px 4px;font-size:13px;display:grid;gap:1px;justify-items:center}
+.quick button small{font-size:11px;color:var(--muted)}
+.quick button.cur{border-color:var(--text-h);font-weight:600}
+.alist{display:grid;border-top:1px solid var(--border)}
+.alist button{display:flex;align-items:center;gap:12px;min-height:48px;border-bottom:1px solid var(--border);text-align:left;font-size:15px;color:var(--text-h)}
+.alist button svg{width:19px;height:19px;color:var(--muted);flex:0 0 auto}
+.alist .danger,.alist .danger svg{color:var(--warn)}
+.sheet textarea{width:100%;min-height:120px;resize:none;border:1px solid var(--border);border-radius:12px;padding:12px;font:14.5px/1.5 var(--mono);background:var(--panel);outline:none}
+
+.toast{position:absolute;left:16px;right:16px;bottom:86px;z-index:25;background:var(--text-h);color:var(--panel);border-radius:12px;padding:11px 14px;font-size:14px;display:flex;justify-content:space-between;align-items:center;opacity:0;transform:translateY(8px);transition:opacity .18s,transform .18s;pointer-events:none}
+.toast.on{opacity:1;transform:none;pointer-events:auto}
+.toast button{color:var(--panel);font-weight:600;text-decoration:underline}
+
+/* artifact at phone width: drop the bezel, keep the mock usable */
+@media (max-width:860px){
+  .page{grid-template-columns:minmax(0,1fr);gap:28px;padding-inline:16px}
+  .stage{position:static}
+}
+@media (max-width:440px){
+  .phone{width:100%;height:760px;padding:0;border-radius:18px;background:none;box-shadow:none;border:1px solid var(--border)}
+  .screen{border-radius:18px}
+  .statusbar,.urlbar{display:none}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="page">
+  <div class="stage">
+    <div class="stage-ctl">
+      <span class="seg-label">Sections</span>
+      <div class="seg" role="group" aria-label="Section layout">
+        <button id="lay-tabs" aria-pressed="true" data-layout="tabs">Tabs</button>
+        <button id="lay-stack" aria-pressed="false" data-layout="stack">Stacked</button>
+      </div>
+    </div>
+    <div class="phone">
+      <div class="screen" id="screen">
+        <div class="statusbar"><span>1:11</span><i>●●●● ◔ ▮</i></div>
+        <div class="urlbar">dashboard.example.com</div>
+        <div class="app" id="app"></div>
+        <nav class="bnav" aria-label="App">
+          <button aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10.5 12 4l8 6.5"/><path d="M6 9.5V20h4v-6h4v6h4V9.5"/></svg>Home</button>
+          <button><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="1.5"/><path d="M7.5 9h9M7.5 12.5h9M7.5 16h5"/></svg>News</button>
+          <button class="fab" data-act="capture" aria-label="Quick capture"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span></button>
+          <button><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m9 8-4 4 4 4M15 8l4 4-4 4"/></svg>Dev</button>
+          <button data-act="me"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="9" r="3.5"/><path d="M5 20c1.2-3.6 4-5 7-5s5.8 1.4 7 5"/></svg>Me</button>
+        </nav>
+        <div class="toast" id="toast"><span id="toast-msg"></span><button data-act="undo">Undo</button></div>
+        <div class="scrim" id="scrim" data-act="close"></div>
+        <div class="sheet" id="sheet" role="dialog" aria-modal="true"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div>
+      <h1>Dashboard on a phone</h1>
+    </div>
+    <p class="lede">The mock on the left works: tap rows, the ⋯ buttons, the thread rows, the filter chips and the + in the bottom bar. Sample data is made up. Everything here applies below 640px only. Desktop and the current 640–1080px stacked layout stay as they are.</p>
+
+    <div class="bugs">
+      <h2>What's broken today (from the screenshots)</h2>
+      <ul>
+        <li>The nav rail takes about 90 of 390px, so every panel is squeezed into the rest.</li>
+        <li>Task titles cut off after 4–5 characters. The date column wraps to three lines ("7 / Oct / 202").</li>
+        <li>The calendar strip shows up as an empty white card.</li>
+        <li>Thread rows: the step text gets 1 character ("p"), and the pills and +1 push past the edge.</li>
+        <li>Scratchpad: the placeholder, RECENT, the notes and the Capture button all draw on top of each other.</li>
+        <li>Each panel gets a 60vh minimum height, so you scroll through four tall boxes to find anything.</li>
+      </ul>
+    </div>
+
+    <div class="dec-list">
+      <section class="dec">
+        <div class="dec-head"><span class="dec-id">M1</span><h3>Bottom bar instead of the nav rail</h3></div>
+        <p>Home · News · <b>+</b> · Dev · Me. Settings, the avatar and sign-out move into a "Me" sheet. The page gets its full width back. The + opens quick capture from any view.</p>
+        <p class="alt"><b>Alternative:</b> a hamburger menu in the header. It saves the bottom space but hides views behind an extra tap.</p>
+        <button class="try" data-try="me">Try it: tap Me</button>
+      </section>
+
+      <section class="dec">
+        <div class="dec-head"><span class="dec-id">M2</span><h3>One section at a time, behind tabs</h3></div>
+        <p>A sticky tab row: My Tasks · Follow-ups · Threads · Scratch, each with its count. You see one list at full height and switch with a tap. The header (date, agenda, tabs) stays put while the list scrolls.</p>
+        <p class="alt"><b>Alternative:</b> Stacked. All four sections on one scrolling page, each collapsible, with no fixed heights. Use the "Stacked" toggle above the phone to compare.</p>
+      </section>
+
+      <section class="dec">
+        <div class="dec-head"><span class="dec-id">M3</span><h3>Calendar becomes a swipeable agenda row</h3></div>
+        <p>The hour axis can't fit 390px. Instead: one row of event cards, past ones dimmed, a red "now" marker, and the next event highlighted. Day arrows stay in the header.</p>
+        <p class="alt"><b>Alternative:</b> keep the axis but show only ±3 hours around now. It's closer to desktop but cramped.</p>
+      </section>
+
+      <section class="dec">
+        <div class="dec-head"><span class="dec-id">M4</span><h3>Task rows: title first, everything else behind ⋯</h3></div>
+        <p>A 44px checkbox, then the title across the full width (up to 2 lines), then the thread chip on a line below it. The drag handle and the date icon go away. ⋯ opens a sheet with Today / Tomorrow / Next week / Pick date, Move to list, Edit, Delete, and Open thread when the task has one. These are the desktop row actions, nothing new. Completing a task shows the usual Undo toast.</p>
+        <p class="alt"><b>Locked:</b> no drag on mobile. Reordering and grouping stay desktop-only. Existing groups still render, read-only.</p>
+        <button class="try" data-try="task">Try it: open a task's ⋯</button>
+      </section>
+
+      <section class="dec">
+        <div class="dec-head"><span class="dec-id">M5</span><h3>Threads: two-line rows, filters scroll sideways</h3></div>
+        <p>Line 1: title, age, ⋯. Line 2: the next step in full, with the whose-move pill and "+1 step" under it. The filter chips sit in one row that scrolls sideways. "+ thread" moves to the section header. The list/graph toggle is hidden because only the list view works at this width.</p>
+        <button class="try" data-try="threads">Try it: go to Threads, expand one</button>
+      </section>
+
+      <section class="dec">
+        <div class="dec-head"><span class="dec-id">M6</span><h3>Scratchpad: plain vertical flow, plus quick capture</h3></div>
+        <p>The editor grows with its text, a full-width Capture button sits below it, and Recent comes last. Nothing overlaps. The bottom-bar + opens the same editor as a sheet, so you can capture something without leaving the tab you're on.</p>
+        <button class="try" data-try="capture">Try it: tap +</button>
+      </section>
+
+      <section class="dec">
+        <div class="dec-head"><span class="dec-id">M7</span><h3>Dev view gets the same pass</h3></div>
+        <p>Dev already has tabs. On a phone its header stacks, the lane tabs scroll sideways, and draft cards and their edit forms take the full width. News only has to fit without sideways scrolling; a proper News pass comes later.</p>
+      </section>
+      <section class="dec open">
+        <div class="dec-head"><span class="dec-id">✓</span><h3>Locked 2026-10-04</h3></div>
+        <p>Tabs, not Stacked. No drag on mobile. No swipe gestures. Home and Dev in scope. Brief: <code>docs/goals/goal-15.md</code>.</p>
+      </section>
+    </div>
+    <p class="scope">Once these are settled, the goal is CSS plus a few mobile-only components (bottom bar, tabs, action sheet, agenda row) behind a <code>max-width: 640px</code> query or a <code>useIsMobile()</code> hook. Data and API stay the same.</p>
+  </div>
+</div>
+
+<script>
+(function(){
+const LINK='<svg viewBox="0 0 14 8" fill="currentColor"><circle cx="2.5" cy="4" r="2.2"/><circle cx="7" cy="4" r="2.2"/><circle cx="11.5" cy="4" r="2.2" opacity=".55"/></svg>';
+const DOTS='<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>';
+const CHECK='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"/></svg>';
+const CHEV='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 3.5 4.5 4.5L6 12.5"/></svg>';
+const L='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 6-6 6 6 6"/></svg>';
+const R='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>';
+const REFRESH='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4.5h-4.5"/></svg>';
+const LOGO='<svg class="logo" viewBox="0 0 28 28"><rect width="28" height="28" rx="8" fill="var(--muted-bg)"/><path d="M9 14 19 9M9 14l10 5" stroke="#4c9a6a" stroke-width="2.2" stroke-linecap="round"/><circle cx="9" cy="14" r="3" fill="var(--brand)"/><circle cx="19" cy="9" r="3" fill="var(--brand)"/><circle cx="19" cy="19" r="3" fill="var(--brand)"/></svg>';
+const I={
+  move:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h14M13 7l5 5-5 5"/></svg>',
+  thread:'<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2.6"/><circle cx="12" cy="12" r="2.6"/><circle cx="19" cy="12" r="2.6" opacity=".5"/></svg>',
+  group:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h10"/></svg>',
+  edit:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>',
+  del:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg>',
+  gear:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg>',
+  out:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M12 3v8M7 6.5a7 7 0 1 0 10 0"/></svg>',
+  step:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><path d="M12 9v6M9 12h6"/></svg>',
+  arch:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="4" y="5" width="16" height="4" rx="1"/><path d="M5.5 9v10h13V9M10 13h4"/></svg>'
+};
+
+const S={layout:'tabs',tab:'mine',filter:'all',open:{},collapsed:{follow:true,threads:true,scratch:true},day:0,undo:null};
+const mine=[
+ {b:'today',items:[{id:1,t:'Renew travel visa'},{id:2,t:'Call teammate A about the budget'}]},
+ {b:'tom',items:[{id:3,t:'Teammate B: clean up the LLM module — github.com/org/repo/pull/412',th:'agent nodes'},{id:4,t:'Read vendor AI brochure'},{id:5,t:'Team half-yearly review'},{id:6,t:'Teammate C: integrate payments?',th:'partner onboarding'}]}
+];
+const follow=[
+ {b:'tom',items:[{id:11,t:'Teammate B: guardrails, backend — fix licence check'},{id:12,t:'Teammate B: connect leads with the partner org'},{id:13,t:'Teammate B: set up meeting with the legal partner',th:'tts'},{id:14,t:'Teammate D: beneficiary info extractor agent',th:'agent nodes'},{id:15,t:'Ping teammate E',th:'pilot program'}]},
+ {b:'wed',label:'Wed, Oct 7',items:[{id:16,t:'Video feedback awaited',th:'video series'}]},
+ {b:'mon',label:'Mon, Oct 19',items:[{id:17,t:'Teammate F: follow up on the contract',th:'pilot program'}]}
+];
+const threads=[
+ {id:'a',t:'partner onboarding',age:'16d',w:'mine',s:'Teammate C: integrate payments?',d:'Tomorrow',more:1,hist:['Sent the API docs to the partner','Kick-off call with partner NGO']},
+ {id:'b',t:'pilot program',age:'41d',w:'follow',s:'Ping teammate E',d:'Tomorrow',more:1,hist:['Shared pilot results deck']},
+ {id:'c',t:'tts',age:'4d',w:'follow',s:'Teammate B: set up meeting with the legal partner',d:'Tomorrow',hist:['Voice samples reviewed']},
+ {id:'d',t:'agent nodes',age:'3d',w:'follow',s:'Teammate D: beneficiary info extractor agent',d:'Tomorrow',hist:['Scoped node interface']},
+ {id:'e',t:'NGO visit',age:'3d',w:'mine',s:'List of NGOs in the city to visit',d:'Tomorrow',hist:['Booked travel dates']},
+ {id:'f',t:'video series',age:'18d',w:'follow',s:'Video feedback awaited',d:'Wed 7 Oct',hist:['Sent first cut to reviewers']}
+];
+const recent=['notes on city NGOs','notes from 1:1 with teammate A','ideas for the pilot report'];
+const events=[{t:'9:30',n:'Standup',p:1},{t:'11:00',n:'Partner call',p:1},{now:1},{t:'3:00 pm',n:'Weekly sync',next:1},{t:'5:30 pm',n:'1:1 with teammate A'},{t:'7:00 pm',n:'Gym'}];
+const done=new Set();
+const days=['Sun, 4 Oct','Mon, 5 Oct','Tue, 6 Oct'];
+const bucketLabel={today:['Today','Sun 4 Oct'],tom:['Tomorrow','Mon 5 Oct']};
+
+const app=document.getElementById('app');
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const count=l=>l.reduce((n,b)=>n+b.items.filter(i=>!done.has(i.id)).length,0);
+const fcount={all:threads.length,next:0,mine:threads.filter(t=>t.w==='mine').length,follow:threads.filter(t=>t.w==='follow').length,arch:0};
+
+function header(){
+  const tabs=[['mine','My Tasks',count(mine)],['follow','Follow-ups',count(follow)],['threads','Threads',threads.length],['scratch','Scratch','']];
+  return `<div class="ahead" id="ahead">
+    <div class="arow">${LOGO}<div class="day"><button data-act="prev" aria-label="Previous day">${L}</button>${days[S.day]}<button data-act="next" aria-label="Next day">${R}</button></div>
+    <button class="icon-btn" aria-label="Refresh">${REFRESH}</button></div>
+    <div class="agenda" aria-label="Today's events">${S.day?'<div class="ev"><b>All day</b><span>No events yet</span></div>':events.map(e=>e.now?'<div class="now">1:11</div>':`<button class="ev${e.p?' past':''}${e.next?' next':''}"><b>${e.next?'Next · ':''}${e.t}</b><span>${esc(e.n)}</span></button>`).join('')}</div>
+    ${S.layout==='tabs'?`<div class="tabs" role="tablist">${tabs.map(([k,n,c])=>`<button class="tab" role="tab" data-tab="${k}" aria-selected="${S.tab===k}">${n}${c!==''?` <small>${c}</small>`:''}</button>`).join('')}</div>`:''}
+  </div>`;
+}
+function taskRow(i){
+  return `<div class="task${done.has(i.id)?' done':''}" data-id="${i.id}">
+    <button class="chk" data-act="done" aria-label="Complete"><i>${CHECK}</i></button>
+    <button class="tmain" data-act="sheet"><span class="ttitle">${esc(i.t)}</span>${i.th?`<span class="tmeta"><span class="chip">${LINK}${esc(i.th)}</span></span>`:''}</button>
+    <button class="more" data-act="sheet" aria-label="More">${DOTS}</button></div>`;
+}
+function taskList(list,ph){
+  return `<label class="addrow"><span style="font-size:18px">+</span><input id="add-${ph}" placeholder="Add a task"></label>`+
+   list.map(b=>{const [a,c]=bucketLabel[b.b]||[b.label,''];return `<div class="bucket ${b.b==='today'?'today':b.b==='tom'?'tom':''}"><span>${a}</span><span>${c}</span></div>${b.items.map(taskRow).join('')}`}).join('');
+}
+function threadList(){
+  const f=[['all','All'],['next','Needs next step'],['mine','My task'],['follow','Follow-up'],['arch','Archived']];
+  const shown=threads.filter(t=>S.filter==='all'||t.w===S.filter);
+  return `<div class="filters">${f.map(([k,n])=>`<button class="fchip" data-filter="${k}" aria-pressed="${S.filter===k}">${n} <small>${fcount[k]}</small></button>`).join('')}</div>`+
+   (shown.length?shown.map(t=>{const o=S.open[t.id];return `<div class="thr${o?' open':''}" data-th="${t.id}">
+     <div class="thr-head"><button class="caret" data-act="thr" aria-expanded="${!!o}" aria-label="Expand">${CHEV}</button><button class="thr-title" data-act="thr" style="text-align:left">${esc(t.t)}</button><span class="age">${t.age}</span><button class="more" data-act="thrsheet" aria-label="More">${DOTS}</button></div>
+     ${o?`<div class="thr-detail">
+        <div class="step"><span class="dot ${t.w}"></span><div class="step-body"><span class="step-text">${esc(t.s)}</span><span class="step-meta"><span class="pill ${t.w}">${t.w==='mine'?'My task':'Follow-up'} · ${t.d}</span></span></div></div>
+        ${t.more?`<div class="step"><span class="dot follow"></span><div class="step-body"><span class="step-text">Wait for the signed agreement</span><span class="step-meta"><span class="pill follow">Follow-up · Fri 9 Oct</span></span></div></div>`:''}
+        ${t.hist.map(h=>`<div class="hist"><span class="dot done" style="width:9px;height:9px;margin-top:6px"></span><span><s>${esc(h)}</s></span></div>`).join('')}
+        <div class="thr-actions"><button class="ghost">+ next step</button><button class="ghost">+ note</button></div></div>`
+     :`<div class="step"><span class="dot ${t.w}"></span><div class="step-body"><span class="step-text">${esc(t.s)}</span><span class="step-meta"><span class="pill ${t.w}">${t.w==='mine'?'My task':'Follow-up'} · ${t.d}</span>${t.more?`<span class="plus">+${t.more} step</span>`:''}</span></div></div>`}
+   </div>`}).join(''):'<p style="padding:24px 16px;color:var(--muted)">No threads need a next step.</p>');
+}
+function scratch(){
+  return `<div class="scratch"><textarea id="scratch-ed" placeholder="Dump a thought. &quot;- &quot; starts a bullet.\nCapture files it…"></textarea>
+   <button class="capture" data-act="cap" disabled>Capture</button>
+   <div class="recent-h">Recent</div><div class="recent">${recent.map(r=>`<div class="rec"><span>${esc(r)}</span><span class="tag">Note</span></div>`).join('')}</div></div>`;
+}
+const SEC={mine:['My Tasks',()=>taskList(mine,'mine'),()=>count(mine)],follow:['Follow-ups',()=>taskList(follow,'follow'),()=>count(follow)],threads:['Threads',threadList,()=>threads.length],scratch:['Scratchpad',scratch,()=>'']};
+
+function render(){
+  const st=app.scrollTop;
+  let body='';
+  if(S.layout==='tabs'){
+    const [n,fn]=SEC[S.tab];
+    const extra=S.tab==='threads'?`<button class="solid" style="margin-left:auto">+ thread</button>`:'';
+    body=`<div class="sec-head"><h2>${n}</h2>${extra}</div>`+fn();
+  } else {
+    body=Object.entries(SEC).map(([k,[n,fn,c]],ix)=>{const col=S.collapsed[k];return `<button class="collapse" data-col="${k}" aria-expanded="${!col}" ${ix===0?'style="border-top:0"':''}><h2>${n}</h2><span class="cnt">${c()}</span><span class="chev">${CHEV}</span></button>${col?'':fn()}`}).join('');
+  }
+  app.innerHTML=header()+`<div class="body">${body}</div>`;
+  app.scrollTop=st;
+  const ed=document.getElementById('scratch-ed');
+  if(ed){ed.addEventListener('input',()=>{ed.style.height='auto';ed.style.height=Math.max(150,ed.scrollHeight+2)+'px';ed.nextElementSibling.disabled=!ed.value.trim();});}
+}
+app.addEventListener('scroll',()=>{const h=document.getElementById('ahead');h&&h.classList.toggle('scrolled',app.scrollTop>4)});
+
+const sheet=document.getElementById('sheet'),scrim=document.getElementById('scrim');
+function openSheet(html){sheet.innerHTML='<div class="grab"></div>'+html;sheet.classList.add('on');scrim.classList.add('on');const f=sheet.querySelector('textarea');f&&setTimeout(()=>f.focus(),220);}
+function closeSheet(){sheet.classList.remove('on');scrim.classList.remove('on');}
+const findTask=id=>[...mine,...follow].flatMap(b=>b.items).find(i=>i.id==id);
+function taskSheet(id){
+  const t=findTask(id),inMine=mine.some(b=>b.items.some(i=>i.id==id));
+  openSheet(`<h3>${esc(t.t)}</h3><div class="sub">${inMine?'My Tasks':'Follow-ups'}${t.th?' · thread: '+esc(t.th):''}</div>
+   <div class="quick"><button>Today<small>Sun</small></button><button class="cur">Tomorrow<small>Mon</small></button><button>Next wk<small>Mon 12</small></button><button>Pick…<small>date</small></button></div>
+   <div class="alist"><button>${I.move}Move to list…</button>${t.th?`<button>${I.thread}Open thread</button>`:''}<button>${I.edit}Edit title / notes</button><button class="danger">${I.del}Delete</button></div>`);
+}
+function thrSheet(id){
+  const t=threads.find(x=>x.id===id);
+  openSheet(`<h3>${esc(t.t)}</h3><div class="alist"><button>${I.step}Add next step</button><button>${I.edit}Rename</button><button>${I.arch}Archive</button><button class="danger">${I.del}Delete thread</button></div>`);
+}
+function capSheet(){openSheet(`<h3>Quick capture</h3><textarea id="qc" placeholder="Dump a thought…"></textarea><button class="capture" data-act="capdone">Capture</button>`);}
+function meSheet(){openSheet(`<div style="display:flex;gap:12px;align-items:center"><span style="width:40px;height:40px;border-radius:50%;background:var(--muted-bg);display:grid;place-items:center;font-weight:600;color:var(--text-h)">A</span><div><h3>Signed in</h3><div class="sub" style="margin:0">you@example.org</div></div></div><div class="alist"><button>${I.gear}Settings</button><button class="danger">${I.out}Sign out</button></div>`);}
+
+let toastT;
+function toast(msg,undo){const t=document.getElementById('toast');document.getElementById('toast-msg').textContent=msg;S.undo=undo;t.classList.add('on');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('on'),4000);}
+
+document.getElementById('screen').addEventListener('click',e=>{
+  const b=e.target.closest('button,[data-act]');if(!b)return;
+  const act=b.dataset.act,row=b.closest('[data-id]'),th=b.closest('[data-th]');
+  if(b.dataset.tab){S.tab=b.dataset.tab;app.scrollTop=0;render();return;}
+  if(b.dataset.filter){S.filter=b.dataset.filter==='arch'||b.dataset.filter==='next'?b.dataset.filter:b.dataset.filter;render();return;}
+  if(b.dataset.col){S.collapsed[b.dataset.col]=!S.collapsed[b.dataset.col];render();return;}
+  switch(act){
+    case 'done':{const id=+row.dataset.id;if(done.has(id)){done.delete(id);render();}else{done.add(id);render();toast('Task completed',()=>{done.delete(id);render();});}break;}
+    case 'sheet':taskSheet(row.dataset.id);break;
+    case 'thr':S.open[th.dataset.th]=!S.open[th.dataset.th];render();break;
+    case 'thrsheet':thrSheet(th.dataset.th);break;
+    case 'capture':capSheet();break;
+    case 'capdone':{const v=(document.getElementById('qc').value||'').trim();closeSheet();if(v){recent.unshift(v.split('\n')[0].slice(0,60));render();}toast(v?'Captured to scratchpad':'Nothing to capture',null);break;}
+    case 'cap':{const ed=document.getElementById('scratch-ed');recent.unshift(ed.value.trim().split('\n')[0].slice(0,60));render();toast('Captured',null);break;}
+    case 'me':meSheet();break;
+    case 'close':closeSheet();break;
+    case 'undo':S.undo&&S.undo();document.getElementById('toast').classList.remove('on');break;
+    case 'prev':S.day=Math.max(0,S.day-1);render();break;
+    case 'next':S.day=Math.min(2,S.day+1);render();break;
+  }
+  if(b.closest('.alist')&&!act){closeSheet();toast('Done (mock)',null);}
+  if(b.closest('.quick')){closeSheet();toast('Rescheduled (mock)',null);}
+});
+document.getElementById('toast').querySelector('button').toggleAttribute('hidden',false);
+
+function setLayout(l){S.layout=l;document.querySelectorAll('[data-layout]').forEach(x=>x.setAttribute('aria-pressed',x.dataset.layout===l));app.scrollTop=0;render();}
+document.querySelectorAll('[data-layout]').forEach(x=>x.addEventListener('click',()=>setLayout(x.dataset.layout)));
+document.querySelectorAll('[data-try]').forEach(x=>x.addEventListener('click',()=>{
+  const k=x.dataset.try;closeSheet();
+  if(k==='me')meSheet();
+  if(k==='capture')capSheet();
+  if(k==='task'){if(S.layout!=='tabs')setLayout('tabs');S.tab='mine';render();taskSheet(3);}
+  if(k==='threads'){if(S.layout!=='tabs')setLayout('tabs');S.tab='threads';S.open={a:true};app.scrollTop=0;render();}
+  document.querySelector('.phone').scrollIntoView({behavior:'smooth',block:'nearest'});
+}));
+render();
+})();
+</script>

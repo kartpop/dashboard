@@ -51,6 +51,40 @@ paths: ["frontend/**"]
   reload (`load()`) after a drag op. A single drag always produces exactly one PATCH
   (rank ± group_id). For the DnD implementation details, known rough edges, and bug history
   see `.claude/rules/tasks-panel.md` (auto-loads when editing `frontend/src/panels/tasks/**`).
+- **Mobile layout (goal 15).** One breakpoint, **640px**: `MOBILE_MAX` in `src/useIsMobile.ts`
+  and every `@media (max-width: 640px)` in `index.css` — keep them in sync (both carry a
+  comment). Two tools, two jobs: **CSS** does sizing/spacing/wrapping/hiding (the default);
+  **`useIsMobile()`** (`useSyncExternalStore` over `matchMedia`, re-renders on rotate/resize) is
+  used ONLY where the tree is a different shape — `AppShell` (bottom bar + Me sheet vs the rail),
+  `DashboardPage` (`MobileHome` vs the grid), and the `mobile` prop it hands `ThreadsPanel` /
+  `CapturePanel`. Don't scatter `isMobile ? … : …` through leaf styling. 641–1080px keeps the
+  stacked desktop layout (the calendar strip now wraps under the title there instead of being
+  hidden).
+  - **Mounted tab panes:** `MobileHome` (sticky header: brand · ‹ day › · refresh, `AgendaRow`,
+    tabs) keeps all four `.m-pane`s mounted and toggles `hidden`, like `.view-pane` — drafts,
+    expanded threads and forms survive a switch. The page (document) scrolls on a phone, so
+    `MobileHome` stores/restores `scrollY` per tab. A `threads.request` with mode focus/next
+    switches to the Threads tab first (task chip, sheet's Open thread, completion toast).
+  - **`Sheet.tsx`** is a shared leaf (like `api.ts`): scrim + bottom panel, Esc/scrim → `onClose`,
+    no panel knowledge, so any panel may import it. It replaces anchored popovers on a phone (task
+    actions, thread ⋯ menu, step editor, event details, Me, quick capture).
+  - **No drag on mobile:** `MobileTaskList` renders no DndContext/sortables/handles at all; groups
+    are read-only. Row = checkbox · title (≤2 lines) · ⋯ → task sheet with the desktop row's
+    actions only (Today/Tomorrow/Next week/Pick date → `setDueDate`, move, edit, open thread,
+    delete). Row helpers both list views share live in `panels/tasks/taskRows.ts`.
+  - **Touch rules:** inputs/textareas/selects are ≥16px at ≤640px (a blanket `!important` rule —
+    iOS zooms on focus below 16px); checkboxes, ⋯, tabs and bar items are ≥44px targets; no
+    hover-only paths (the calendar hover card became the event sheet); heights use `dvh`; the bar
+    pads `env(safe-area-inset-bottom)` (`viewport-fit=cover`) and toasts sit above it.
+  - **Quick capture shares state by lifting:** `useCapture()` (scratch data + the one deferred
+    `POST /scratch` path + Undo) is owned by `AppShell`; the Scratch tab's `CapturePanel` and the
+    bottom bar's `QuickCaptureSheet` both call `capture.submit(text, restore)`, so a quick capture
+    shows in Recent at once. The Undo toast (`CaptureUndoToast`) renders once in `AppShell`;
+    `DashboardPage` registers `tasks.refresh` via `capture.setOnRouted`.
+  - **Scratch tab sizing = the desktop column's:** `.capture-panel--mobile` is a fixed-height flex
+    column, `100dvh − --m-head-h − bar`; `MobileHome` measures its sticky header into
+    `--m-head-h` (ResizeObserver). The editor flexes into everything above RECENT, which rests at
+    header + 2 rows (`--recent-rest`) and scrolls internally.
 - **Deferred-write undo toasts (g4a delete, g7a capture) — a shared shape, not an abstraction.**
   Two surfaces now hold a write behind a ~5s "Undo" toast, and they share the same skeleton (kept
   local to each, deliberately — no forced helper): the optimistic UI change applies immediately; the
@@ -58,7 +92,8 @@ paths: ["frontend/**"]
   `commitPending()` fires the held write when the window lapses **and** is called first when a new
   action supersedes the pending one (one toast at a time); an unmount effect flushes any still-held
   write. The two differ only in what Undo does: **delete** (in `useTasksPanel`) restores a snapshot
-  and never sends the `DELETE` (zero Google writes); **capture** (in `CapturePanel`) restores the
-  text into the editor — prepending above anything typed during the window — and never sends the
+  and never sends the `DELETE` (zero Google writes); **capture** (in `useCapture`, lifted out of
+  `CapturePanel` in goal 15) restores the text into whichever editor sent it (the Scratch editor or
+  the quick-capture draft) — prepending above anything typed during the window — and never sends the
   `POST /scratch` (zero backend writes; the append-only store has no delete endpoint by design). If a
   third deferred toast appears, *then* consider extracting; two is not enough to abstract.

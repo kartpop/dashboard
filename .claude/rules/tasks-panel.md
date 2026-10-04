@@ -243,6 +243,14 @@ stays — it also dodges the column's `overflow-y:auto` scroll clip).
   an edit / due / reschedule / move / complete / undo resolves (the pre-move id for moves). Both
   live in a ref; the hook's state machines are otherwise unchanged.
 
+## Goal 15 — phone list
+
+At ≤640px `DashboardPage` renders `MobileTaskList` (`MobileTaskList.tsx`) per pinned list instead
+of `PinnedTasksRow`: **no dnd-kit at all** (no context, sensors, sortables or handle — reorder,
+cross-list drag and group editing are desktop-only), groups read-only, no per-row date input, and
+the ⋯ / title tap opens a task sheet that calls the same `TaskActions` (`buildTaskActions` in
+`taskRows.ts`, shared with `TaskListColumn`). The DnD code above is untouched.
+
 ## Bug log — what broke, why, and what fixed it
 
 ### 1. Groups can only be dragged once
