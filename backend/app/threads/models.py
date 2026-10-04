@@ -1,8 +1,8 @@
 """Threads tables (goal 14): the story behind each task.
 
 A `Thread` is a titled, ordered list of `ThreadStep`s. Done steps are local history;
-the (at most one, always last) `next` step links a live Google Task in one of the
-two pinned lists. Google is the source of truth for a next step's title / notes /
+`next` ("open") steps — any number since goal 14a, ranked after every done step —
+each link a live Google Task in one of the two pinned lists. Google is the source of truth for a next step's title / notes /
 due — the row keeps the link plus a cached copy, refreshed by the reconcile on
 `GET /threads` (see `app.threads.service`).
 """
@@ -31,21 +31,15 @@ class Thread(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow, nullable=False)
 
 
-# Partial unique indexes (SQLite ≥ 3.8 and Postgres both support `WHERE`): one live
-# next step per thread, and a Google task linked by at most one next step per user.
+# Partial unique index (SQLite ≥ 3.8 and Postgres both support `WHERE`): a Google
+# task is linked by at most one open step per user. (Goal 14's one-next-per-thread
+# index was dropped in goal 14a.)
 _NEXT_ONLY = text("kind = 'next'")
 
 
 class ThreadStep(SQLModel, table=True):
     __tablename__ = "thread_step"
     __table_args__ = (
-        Index(
-            "uq_thread_step_one_next",
-            "thread_id",
-            unique=True,
-            sqlite_where=_NEXT_ONLY,
-            postgresql_where=_NEXT_ONLY,
-        ),
         Index(
             "uq_thread_step_next_task",
             "user_id",
@@ -59,7 +53,8 @@ class ThreadStep(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     thread_id: int = Field(foreign_key="thread.id", index=True)
     user_id: int = Field(foreign_key="user.id", index=True)
-    # Float rank, midpoint insertion (like the overlay). The next step is always max.
+    # Float rank, midpoint insertion (like the overlay). Open steps rank after every
+    # done step; the API orders the open block by due, not rank.
     position: float
     kind: str = Field(max_length=8)  # "done" | "next"
     label: str = Field(max_length=1000)

@@ -82,8 +82,33 @@ export function istDayKey(offsetDays = 0): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-export function nextOf(t: Thread): Step | null {
-  return t.steps.find((s) => s.kind === "next") ?? null;
+/** A thread's open (next) steps in display order: soonest due first (goal 14a). */
+export function openOf(t: Thread): Step[] {
+  return t.steps.filter((s) => s.kind === "next");
+}
+
+/** The soonest-due open step, or null when the thread is dangling. */
+export function soonestOpen(t: Thread): Step | null {
+  return openOf(t)[0] ?? null;
+}
+
+/** Mirror the backend's display order: done steps as they stand, then the open
+ * block by due ascending (undated last), ties kept in creation order. */
+function orderSteps(steps: Step[]): Step[] {
+  const done = steps.filter((s) => s.kind !== "next");
+  const open = steps
+    .filter((s) => s.kind === "next")
+    .map((s, i) => ({ s, i }))
+    .sort((a, b) => {
+      if (a.s.due !== b.s.due) {
+        if (a.s.due === null) return 1;
+        if (b.s.due === null) return -1;
+        return a.s.due < b.s.due ? -1 : 1;
+      }
+      return a.i - b.i;
+    })
+    .map((x) => x.s);
+  return [...done, ...open];
 }
 
 // Temp ids for optimistic rows are negative so they never collide with DB ids.
@@ -118,11 +143,13 @@ function withLastMoved(t: Thread): Thread {
   };
 }
 
-/** Flip a thread's next step to done (optimistic mirror of the backend flip). */
+/** Flip one open step to done (optimistic mirror of the backend flip): it joins
+ * the end of the done history, and its siblings stay open. */
 function flipNextDone(t: Thread, stepId: number): Thread {
   return withLastMoved({
     ...t,
-    steps: t.steps.map((s) =>
+    steps: orderSteps(
+      t.steps.map((s) =>
       s.id === stepId && s.kind === "next"
         ? {
             ...s,
@@ -133,6 +160,7 @@ function flipNextDone(t: Thread, stepId: number): Thread {
             due: null,
           }
         : s,
+      ),
     ),
   });
 }
@@ -345,8 +373,15 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
       const t = threadsRef.current.find((x) => x.id === threadId);
       if (!t) return;
       void setArchived(threadId, true);
+      const n = openOf(t).length;
+      const stays =
+        n === 0
+          ? "."
+          : n === 1
+            ? ". Its open task stays in Google Tasks."
+            : `. Its ${n} open tasks stay in Google Tasks.`;
       showToast(
-        `Archived ${t.title}${nextOf(t) ? ". Its open task stays in Google Tasks." : "."}`,
+        `Archived ${t.title}${stays}`,
         {
           label: "Undo",
           run: () => {
@@ -366,7 +401,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
 
   // ── Steps ────────────────────────────────────────────────────────────────────
 
-  /** Log a done step (dated today unless given), inserted before the next step. */
+  /** Log a done step (dated today unless given), inserted before the open block. */
   const logStep = useCallback(
     (threadId: number, label: string, note?: string) => {
       const trimmed = label.trim();
@@ -408,7 +443,8 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
     [fail],
   );
 
-  /** Set the next step: creates the Google task in the chosen pinned list. */
+  /** Add an open step: creates the Google task in the chosen pinned list. A thread
+   * may hold any number (goal 14a); the new one slots into the open block by due. */
   const setNextStep = useCallback(
     (
       threadId: number,
@@ -436,7 +472,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
         ...s,
         threads: mapThread(s.threads, threadId, (t) => ({
           ...t,
-          steps: [...t.steps, step],
+          steps: orderSteps([...t.steps, step]),
         })),
       }));
       showToast(
@@ -472,8 +508,8 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
         threads: mapThread(s.threads, threadId, (t) =>
           withLastMoved({
             ...t,
-            steps: t.steps.map((x) =>
-              x.id === stepId ? { ...x, ...patch } : x,
+            steps: orderSteps(
+              t.steps.map((x) => (x.id === stepId ? { ...x, ...patch } : x)),
             ),
           }),
         ),
@@ -492,7 +528,11 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
   );
 
   const toastLogged = useCallback(
-    (t: Thread, label: string, list: ListKey | null) => {
+    (t: Thread, label: string, list: ListKey | null, remaining: number) => {
+      if (remaining > 0) {
+        showToast(`Logged “${label}” in ${t.title}. ${remaining} still open.`);
+        return;
+      }
       showToast(`Logged “${label}” in ${t.title}. What’s next?`, {
         label: "Set next step",
         run: () => requestThread(t.id, "next", list ?? undefined),
@@ -513,7 +553,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
         threads: mapThread(s.threads, threadId, (x) => flipNextDone(x, stepId)),
       }));
       requestThread(threadId, "flash");
-      toastLogged(t, step.label, step.list);
+      toastLogged(t, step.label, step.list, openOf(t).length - 1);
       apiPost<Thread>(`/threads/${threadId}/steps/${stepId}/complete`, {})
         .then((nt) => {
           setState((s) => ({
@@ -527,7 +567,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
     [fail, requestThread, tasksChanged, toastLogged],
   );
 
-  /** Delete a done step, or UNLINK a next step (its Google task stays put). */
+  /** Delete a done step, or UNLINK one open step (its Google task stays put). */
   const deleteStep = useCallback(
     (threadId: number, stepId: number) => {
       const snapshot = threadsRef.current;
@@ -570,9 +610,9 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
   const completionSnapshots = useRef(new Map<number, Thread>());
 
   /**
-   * A task was completed in the tasks panel. If it is a thread's live next step,
-   * flip it to done NOW (the backend learns via reconcile) and return what the
-   * tasks toast needs; else null.
+   * A task was completed in the tasks panel. If it is one of a thread's open
+   * steps, flip it to done NOW (the backend learns via reconcile) and return what
+   * the tasks toast needs (incl. how many siblings remain open); else null.
    */
   const markLinkedCompleted = useCallback(
     (
@@ -582,11 +622,12 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
       title: string;
       label: string;
       list: ListKey | null;
+      remaining: number;
     } | null => {
       const t = threadsRef.current.find(
-        (x) => !x.archived && nextOf(x)?.task_id === taskId,
+        (x) => !x.archived && openOf(x).some((s) => s.task_id === taskId),
       );
-      const step = t ? nextOf(t) : null;
+      const step = t ? openOf(t).find((s) => s.task_id === taskId) : null;
       if (!t || !step) return null;
       completionSnapshots.current.set(t.id, t);
       setState((s) => ({
@@ -599,6 +640,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
         title: t.title,
         label: step.label,
         list: step.list,
+        remaining: openOf(t).length - 1,
       };
     },
     [requestThread],
@@ -615,7 +657,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
     }));
   }, []);
 
-  /** Is this Google task a live next step? (DashboardPage gates refreshes on it.) */
+  /** Is this Google task a live open step? (DashboardPage gates refreshes on it.) */
   const isLinked = useCallback(
     (taskId: string) =>
       threadsRef.current.some((t) =>
@@ -629,8 +671,8 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
     const m = new Map<string, ThreadLink>();
     for (const t of state.threads) {
       if (t.archived) continue;
-      const n = nextOf(t);
-      if (n?.task_id) m.set(n.task_id, { id: t.id, title: t.title });
+      for (const n of openOf(t))
+        if (n.task_id) m.set(n.task_id, { id: t.id, title: t.title });
     }
     return m;
   }, [state.threads]);

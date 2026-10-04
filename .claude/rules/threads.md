@@ -2,20 +2,24 @@
 paths: ["backend/app/threads/**", "frontend/src/panels/threads/**"]
 ---
 
-# Threads (goal 14) — link, reconcile, repoint
+# Threads (goal 14, 14a) — link, reconcile, repoint
 
-A thread is an ordered list of steps. **Done** steps are local history. The last step may be the
-one **next** step: a link to a real Google Task in a pinned list (`My Tasks` = my move,
-`Follow-ups` = their move). Brief: `docs/goals/goal-14.md`.
+A thread is an ordered list of steps. **Done** steps are local history. After them comes the
+**open block**: any number (goal 14a) of **next** steps, each a link to a real Google Task in a
+pinned list (`My Tasks` = my move, `Follow-ups` = their move). Open steps are parallel — no
+sequencing between them. Briefs: `docs/goals/goal-14.md`, `docs/goals/goal-14a.md`.
 
 ## Invariants (service-enforced, DB-backed where cheap)
 
-- **One next step per thread, always last.** Partial unique index `uq_thread_step_one_next`
-  (`thread_id WHERE kind='next'`). `add_step` inserts a done step at the midpoint *before* the next
-  step; `set_next` appends at `max + 1000`. `POST /threads/{id}/next` → **409** if one exists.
+- **Every done step ranks before every open step.** `add_step` inserts a done step at the midpoint
+  *before the first* open step; `set_next` appends at `max + 1000` (no 409 — goal 14a dropped the
+  `uq_thread_step_one_next` index). A step flipping to done is **re-ranked** (`_done_slot`) to the
+  end of the done history, before the remaining open steps; a reopened one goes to `max + 1000`.
+- **Display order is derived, not stored:** `serialize_thread` serves done steps by rank, then the
+  open block by due ascending (undated last), ties by rank. The frontend's `orderSteps` mirrors it
+  for optimistic updates; read open steps with `openOf` / `soonestOpen`, never "the last step".
 - **A Google task is linked by at most one next step per user.** Partial unique index
-  `uq_thread_step_next_task` (`user_id, task_id WHERE kind='next'`). Both indexes work on SQLite and
-  Postgres.
+  `uq_thread_step_next_task` (`user_id, task_id WHERE kind='next'`) — works on SQLite and Postgres.
 - **Google is the source of truth** for a next step's title / notes / due. The row caches them;
   the step note *is* the task's description (same field).
 - **`via`** holds the pinned list (`mine`/`follow`) the linked task is in. On a next step the API
@@ -39,10 +43,11 @@ one **next** step: a link to a real Google Task in a pinned list (`My Tasks` = m
 ## Reconcile (`GET /threads`)
 
 One `get_task_lists` fetch (skipped when no step is linked) indexes every task by id, then:
-completed → done (dated by `completed` in IST, else today; label/note snapshotted); a done last step
-whose task is `needsAction` again, with no other next step → next again (undo after a reconcile);
-missing → the next step is deleted (the thread dangles); open → refresh the cache. A failed fetch
-serves the cached state (logged), never an error.
+completed → done (dated by `completed` in IST, else today; label/note snapshotted; several in one
+pass flip in completion order); **any** done step whose task is `needsAction` again → next again at
+the end of the open block, unless another next step links that task (undo after a reconcile);
+missing → that next step is deleted (the thread dangles only if none are left); open → refresh the
+cache. A failed fetch serves the cached state (logged), never an error.
 
 ## Repoint on move
 
@@ -58,8 +63,9 @@ deletion — the next step is removed and the thread dangles. Detecting it is ou
   panels never import each other. Badges come from `threads.links` (`task_id → {id, title}`,
   active threads only), passed to `PinnedTasksRow` as `threadLinks` + `onOpenThread`.
 - Completing a linked task in the tasks panel: `useTasksPanel({onTaskCompleted})` asks
-  `threads.markLinkedCompleted(taskId)`, which flips the thread **optimistically** and returns the
-  toast copy; the tasks toast then carries **Set next step** beside **Undo**, and Undo calls
+  `threads.markLinkedCompleted(taskId)`, which flips that step **optimistically** and returns the
+  toast copy plus `remaining` (siblings still open); the tasks toast then carries **Set next step**
+  (or **Show thread** with "N still open" when siblings remain) beside **Undo**, and Undo calls
   `revertLinkedCompleted`. The backend learns about the completion via reconcile — no extra write.
 - Other tasks-panel writes on a linked task (`onTaskWritten`) trigger a threads refresh rather than
   duplicated optimistic logic; threads writes that touch Google call `onTasksChanged` → the tasks
