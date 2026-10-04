@@ -3,7 +3,12 @@ import type { Me } from "./auth/useAuth";
 import { DashboardPage } from "./DashboardPage";
 import { DevView } from "./dev/DevView";
 import { NewsView } from "./news/NewsView";
+import { CaptureUndoToast } from "./panels/scratch/CapturePanel";
+import { QuickCaptureSheet } from "./panels/scratch/QuickCaptureSheet";
+import { useCapture } from "./panels/scratch/useCapture";
 import { SettingsPage } from "./settings/SettingsPage";
+import { Sheet } from "./Sheet";
+import { useIsMobile } from "./useIsMobile";
 
 type View = "home" | "news" | "dev";
 
@@ -83,12 +88,44 @@ const SIGNOUT_ICON: ReactNode = (
   </svg>
 );
 
+/* Bottom-bar extras (goal 15): the quick-capture "+" and the "Me" account entry. */
+const PLUS_ICON: ReactNode = (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    aria-hidden="true"
+  >
+    <path d="M12 5v14M5 12h14" />
+  </svg>
+);
+const ME_ICON: ReactNode = (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.6"
+    strokeLinecap="round"
+    aria-hidden="true"
+  >
+    <circle cx="12" cy="9" r="3.5" />
+    <path d="M5 20c1.2-3.6 4-5 7-5s5.8 1.4 7 5" />
+  </svg>
+);
+
 /**
  * The app shell (goal 11): a collapsed left nav rail is now the app's spine. It
  * switches between the Home dashboard and the News view, and anchors the account
  * controls — settings + avatar + sign-out — at the bottom-left (moved off the Home
  * header). The News entry only appears when the feature is enabled for the user;
  * the settings-modal restructure and per-user flag UI are goal 12.
+ *
+ * At phone width (goal 15, `useIsMobile`) the rail is not rendered: a fixed bottom
+ * bar (Home · News · + · Dev · Me) navigates instead, "+" opens quick capture from
+ * any view, and "Me" holds the rail's account controls in a sheet. The scratchpad's
+ * capture state is lifted here so quick capture and the Scratch tab share it.
  */
 export function AppShell({
   user,
@@ -101,6 +138,12 @@ export function AppShell({
   const [showSettings, setShowSettings] = useState(false);
   const newsEnabled = user.news_enabled === true;
   const devEnabled = user.dev_enabled === true;
+  const isMobile = useIsMobile();
+  const capture = useCapture();
+  const [showMe, setShowMe] = useState(false);
+  const [showCapture, setShowCapture] = useState(false);
+  // The quick-capture draft outlives the sheet, so closing it keeps the text.
+  const [captureDraft, setCaptureDraft] = useState("");
 
   // Keep each view mounted once visited so switching rails is instant and no
   // panel refetches from scratch (see .claude/rules/frontend.md — no global store;
@@ -121,65 +164,69 @@ export function AppShell({
       ? "home"
       : view;
 
+  const avatar = user.picture ? (
+    <img className="rail-avatar" src={user.picture} alt={user.email} />
+  ) : (
+    <span className="rail-avatar rail-avatar--fallback">
+      {(user.name ?? user.email).charAt(0).toUpperCase()}
+    </span>
+  );
+
   return (
-    <div className="app-shell">
-      <nav className="nav-rail" aria-label="Primary">
-        <div className="nav-rail-top">
-          {/* The brand mark is the Home button — clicking it returns to the
+    <div className={`app-shell${isMobile ? " app-shell--mobile" : ""}`}>
+      {!isMobile && (
+        <nav className="nav-rail" aria-label="Primary">
+          <div className="nav-rail-top">
+            {/* The brand mark is the Home button — clicking it returns to the
               dashboard; it carries the active state when Home is showing, so the
               separate "Home" nav item is gone. */}
-          <button
-            className={`rail-logo-btn${activeView === "home" ? " rail-logo-btn--active" : ""}`}
-            onClick={() => navigate("home")}
-            title="Home"
-            aria-label="Home"
-            aria-current={activeView === "home" ? "page" : undefined}
-          >
-            <img className="nav-rail-logo" src="/logo-mark.svg" alt="" />
-          </button>
-          {newsEnabled && (
-            <RailButton
-              label="News"
-              icon={NAV_ICON.news}
-              active={activeView === "news"}
-              onClick={() => navigate("news")}
-            />
-          )}
-          {devEnabled && (
-            <RailButton
-              label="Dev"
-              icon={NAV_ICON.dev}
-              active={activeView === "dev"}
-              onClick={() => navigate("dev")}
-            />
-          )}
-        </div>
-        <div className="nav-rail-bottom">
-          <button
-            className="rail-btn"
-            onClick={() => setShowSettings(true)}
-            title="Settings"
-            aria-label="Settings"
-          >
-            <span className="rail-icon">{SETTINGS_ICON}</span>
-          </button>
-          {user.picture ? (
-            <img className="rail-avatar" src={user.picture} alt={user.email} />
-          ) : (
-            <span className="rail-avatar rail-avatar--fallback">
-              {(user.name ?? user.email).charAt(0).toUpperCase()}
-            </span>
-          )}
-          <button
-            className="rail-btn"
-            onClick={onSignOut}
-            title="Sign out"
-            aria-label="Sign out"
-          >
-            <span className="rail-icon">{SIGNOUT_ICON}</span>
-          </button>
-        </div>
-      </nav>
+            <button
+              className={`rail-logo-btn${activeView === "home" ? " rail-logo-btn--active" : ""}`}
+              onClick={() => navigate("home")}
+              title="Home"
+              aria-label="Home"
+              aria-current={activeView === "home" ? "page" : undefined}
+            >
+              <img className="nav-rail-logo" src="/logo-mark.svg" alt="" />
+            </button>
+            {newsEnabled && (
+              <RailButton
+                label="News"
+                icon={NAV_ICON.news}
+                active={activeView === "news"}
+                onClick={() => navigate("news")}
+              />
+            )}
+            {devEnabled && (
+              <RailButton
+                label="Dev"
+                icon={NAV_ICON.dev}
+                active={activeView === "dev"}
+                onClick={() => navigate("dev")}
+              />
+            )}
+          </div>
+          <div className="nav-rail-bottom">
+            <button
+              className="rail-btn"
+              onClick={() => setShowSettings(true)}
+              title="Settings"
+              aria-label="Settings"
+            >
+              <span className="rail-icon">{SETTINGS_ICON}</span>
+            </button>
+            {avatar}
+            <button
+              className="rail-btn"
+              onClick={onSignOut}
+              title="Sign out"
+              aria-label="Sign out"
+            >
+              <span className="rail-icon">{SIGNOUT_ICON}</span>
+            </button>
+          </div>
+        </nav>
+      )}
 
       <div className="app-main">
         {/* Every visited view stays mounted; only the active one is displayed
@@ -187,7 +234,7 @@ export function AppShell({
             visible one's root behaves as a direct child of .app-main). This keeps
             per-panel state alive across rail switches — no refetch on return. */}
         <div className="view-pane" hidden={activeView !== "home"}>
-          <DashboardPage />
+          <DashboardPage capture={capture} />
         </div>
         {visited.has("news") && (
           <div className="view-pane" hidden={activeView !== "news"}>
@@ -201,10 +248,116 @@ export function AppShell({
         )}
       </div>
 
+      {isMobile && (
+        <nav className="bottom-bar" aria-label="Primary">
+          <BarButton
+            label="Home"
+            icon={NAV_ICON.home}
+            active={activeView === "home"}
+            onClick={() => navigate("home")}
+          />
+          {newsEnabled && (
+            <BarButton
+              label="News"
+              icon={NAV_ICON.news}
+              active={activeView === "news"}
+              onClick={() => navigate("news")}
+            />
+          )}
+          <button
+            className="bottom-bar-btn bottom-bar-plus"
+            onClick={() => setShowCapture(true)}
+            aria-label="Quick capture"
+          >
+            <span className="bottom-bar-plus-icon">{PLUS_ICON}</span>
+          </button>
+          {devEnabled && (
+            <BarButton
+              label="Dev"
+              icon={NAV_ICON.dev}
+              active={activeView === "dev"}
+              onClick={() => navigate("dev")}
+            />
+          )}
+          <BarButton
+            label="Me"
+            icon={ME_ICON}
+            active={false}
+            onClick={() => setShowMe(true)}
+          />
+        </nav>
+      )}
+
+      {isMobile && showMe && (
+        <Sheet label="Account" onClose={() => setShowMe(false)}>
+          <div className="me-sheet-head">
+            {avatar}
+            <div className="me-sheet-who">
+              <h3 className="sheet-title">{user.name ?? "Signed in"}</h3>
+              <span className="sheet-sub">{user.email}</span>
+            </div>
+          </div>
+          <div className="sheet-list">
+            <button
+              onClick={() => {
+                setShowMe(false);
+                setShowSettings(true);
+              }}
+            >
+              <span className="sheet-list-icon">{SETTINGS_ICON}</span>
+              Settings
+            </button>
+            <button className="sheet-list--danger" onClick={onSignOut}>
+              <span className="sheet-list-icon">{SIGNOUT_ICON}</span>
+              Sign out
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {isMobile && showCapture && (
+        <QuickCaptureSheet
+          capture={capture}
+          draft={captureDraft}
+          setDraft={setCaptureDraft}
+          onClose={() => setShowCapture(false)}
+          onRestore={(held) => {
+            setCaptureDraft((cur) => (cur.trim() ? `${held}\n\n${cur}` : held));
+            setShowCapture(true);
+          }}
+        />
+      )}
+
+      <CaptureUndoToast capture={capture} />
+
       {showSettings && (
         <SettingsPage user={user} onClose={() => setShowSettings(false)} />
       )}
     </div>
+  );
+}
+
+/** A bottom-bar item (goal 15): icon over label, the phone's version of RailButton. */
+function BarButton({
+  label,
+  icon,
+  active,
+  onClick,
+}: {
+  label: string;
+  icon: ReactNode;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`bottom-bar-btn${active ? " bottom-bar-btn--active" : ""}`}
+      onClick={onClick}
+      aria-current={active ? "page" : undefined}
+    >
+      <span className="bottom-bar-icon">{icon}</span>
+      <span className="bottom-bar-label">{label}</span>
+    </button>
   );
 }
 

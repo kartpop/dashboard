@@ -232,6 +232,51 @@ Key selectors:
   carries the routed state; no `route-now` call is needed. (A failure leaves `.state-unrouted`; the
   scheduler backstop — now ~15 min — retries.)
 
+### Goal-15 mobile layout (≤640px) — reusable steps
+
+Phone checks run in Playwright with a phone context; drive **390×844** (primary) and **360×780**
+(small Android), each in light and dark:
+
+```python
+ctx = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True,
+                          has_touch=True, device_scale_factor=2, color_scheme="dark")
+```
+
+Run these two checks on every reachable surface (each Home tab, each Dev lane, Dev config open,
+News, the settings modal) — both should be empty/true:
+
+```python
+# 1. No horizontal page overflow.
+page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+# 2. iOS zoom guard: no visible field under 16px.
+page.evaluate("""[...document.querySelectorAll('input,textarea,select')]
+  .filter(e => e.getClientRects().length)
+  .map(e => [e.className || e.type, parseFloat(getComputedStyle(e).fontSize)])
+  .filter(([, f]) => f < 16)""")
+```
+
+Selectors: `.bottom-bar` / `.bottom-bar-btn` (`--active`; labels Home · News · Dev · Me, the "+"
+is `aria-label="Quick capture"`) — `.nav-rail` must be absent. `.m-head` (sticky header),
+`.m-day` (tap → today), `aria-label="Previous day"/"Next day"`, `.m-refresh`; `.agenda-row` /
+`.agenda-card` (`--past`, `--next`, `--empty` "No events") / `.agenda-now`. Tabs are
+`role="tab"` in `.m-tabs` (count in `small`); panes `.m-pane` (all mounted, inactive ones
+`hidden`). Tasks: `.m-addrow`, `.m-task` (`.m-task-check`, `.m-task-title span` clamps to 2
+lines, `.m-task-more`), `.m-group`; no `.drag-handle` and no row `input[type=date]`. Threads:
+`.threads-panel--mobile`, `.thr-fbar` (one row, scrolls), `.m-thr` (`--open`), `.m-thr-step`,
+`.m-thr-done`, `.m-thr-actions`. Scratch: `.capture-panel--mobile` (editor, `.capture-submit`,
+`.scratch-recent` must not intersect). Sheets: `.sheet` + `.sheet-scrim` (Esc / scrim closes),
+`.sheet-chip` (Today · Tomorrow · Next week · Pick…), `.sheet-list` rows, `.quick-capture-input`.
+Toasts must sit above `.bottom-bar` (compare bounding boxes).
+
+Desktop regression for goal-15-style changes: screenshot Home and Dev at 1440×900 and 1024×768
+(rail, grid, hover card present) and confirm one drag-reorder still fires exactly one PATCH.
+
+**Layout-only runs without a session:** the API is auth-gated, so for pure layout checks the
+verifier may serve generic fixture JSON with `page.route("http://localhost:8010/**", …)`
+(`route.fulfill` with `Access-Control-Allow-Origin: http://localhost:5173` +
+`Access-Control-Allow-Credentials: true`). Fixture data must be generic (no real names). Write
+checks against real Google still follow `verifier-writes`.
+
 **Goal-4 DnD note:** there is now ONE `<DndContext>` per task list (it spans the list's buckets), so a
 task can be dragged *between* date buckets = reschedule (one `reschedule` POST + optimistic re-bucket).
 A within-bucket drag still fires only an overlay PATCH (no Google write). Write-path verification

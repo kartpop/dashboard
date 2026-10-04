@@ -73,3 +73,9 @@ deletion — the next step is removed and the thread dangles. Detecting it is ou
 - Outside requests (badge click, Set next step) arrive as `threads.request` (nonce-guarded) and
   the panel consumes them during render (the "adjust state on prop change" pattern), not in an
   effect. Polling (45s) is held while a form or popover is open.
+- **Phone (goal 15, `ThreadsPanel mobile`):** always the compact list (view toggle + panel refresh
+  hidden; refresh lives in the Home header). Rows are `MobileThreadRow` — collapsed: title · age ·
+  ⋯ over the soonest open step in full + pill + "+N steps"; expanded: a vertical list (open steps,
+  newest 3 done struck with the "+N earlier" fold, then + next step / + log update, or the
+  "What's next?" slot inline when dangling). `StepPopover` and `ThreadMenu` render inside `Sheet`
+  (same content and callbacks; their outside-click listeners are skipped).
