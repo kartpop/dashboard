@@ -4,9 +4,10 @@ The classifier returns a `RouterClassification`; THIS module decides what happen
 and performs (or withholds) the write. The safety contract lives in router.md:
 
 - **LLM-proposes-code-disposes:** no write lives in the classifier; every write is here.
-- **Insert-only blast radius:** the only Google writes reachable from routing are
-  `create_task` (content) + `reschedule` (the g4a date path) for tasks, and
-  `append_note` (goal 7, insert-only into the notes Doc) for notes. The router NEVER
+- **Insert-only blast radius:** the only writes reachable from routing are
+  `create_task` + `reschedule` (the g4a date path) for tasks — local task-store
+  writes since goal 17 — and `append_note` (goal 7, insert-only into the notes Doc)
+  for notes. The router NEVER
   calls `delete_task`, the complete/uncomplete status write, `update_content`, or any
   Docs delete/overwrite — it is *not* a sanctioned `delete_task` caller (writes.md).
 - **Confidence gate / schema gate / allowed-destination gate:** below threshold, or
@@ -31,8 +32,8 @@ from typing import TYPE_CHECKING
 from sqlalchemy import update as sa_update
 from sqlmodel import Session, select
 
+from app.auth.models import User
 from app.errors import ApiError
-from app.google import tasks as tasks_client
 from app.router import config
 from app.router.classifier import classify
 from app.router.models import (
@@ -48,15 +49,15 @@ from app.router.models import (
     ReviewItem,
     ScratchEntry,
 )
-from app.router.schema import RouterFields
+from app.router.schema import RouterClassification, RouterFields
 from app.settings import notes_index
 from app.settings import service as settings_svc
+from app.tasks_store import service as store
+from app.tasks_store.deps import ensure_ready
 from app.writes import service as writes_svc
 
 if TYPE_CHECKING:
     from google.oauth2.credentials import Credentials
-
-    from app.auth.models import User
 
 
 _log = logging.getLogger("router.service")
@@ -316,18 +317,18 @@ async def _dispose_note(
     return KEPT_NOTE
 
 
-async def _resolve_list_id(creds: "Credentials", target_list: str | None) -> str:
-    """Resolve the classifier's `target_list` to a real Google task-list id.
+def _resolve_list_id(session: Session, user_id: int, target_list: str | None) -> str:
+    """Resolve the classifier's `target_list` to a real task-list id.
 
     Opinionated: routing files ONLY into the two pinned lists (`PINNED_LIST_TITLES`)
-    the dashboard renders — never into any other Google list. Matches the requested
+    the dashboard renders — never into any other list. Matches the requested
     list by title (case-insensitive); an unset/unknown target defaults to "My Tasks".
     If the requested pinned list is missing but the other exists, falls back to the
     other pinned list (never a third list). Raises if NEITHER pinned list exists
-    (the two-list prerequisite is unmet) or Google is unreachable — the caller then
-    leaves the entry re-routable.
+    (the two-list prerequisite is unmet) — the caller then leaves the entry
+    re-routable.
     """
-    raw_lists = await tasks_client.get_task_lists(creds)
+    raw_lists = store.get_tasklist_refs(session, user_id)
     # title(lower) → id, restricted to the two pinned lists we are willing to write.
     pinned = {t.lower(): None for t in PINNED_LIST_TITLES}
     for tl in raw_lists:
@@ -347,8 +348,8 @@ async def _resolve_list_id(creds: "Credentials", target_list: str | None) -> str
     raise ApiError(
         502,
         "no_pinned_lists",
-        "This account has neither 'My Tasks' nor 'Follow-ups'. Create both task "
-        "lists in Google Tasks — the dashboard requires them.",
+        "This account has neither 'My Tasks' nor 'Follow-ups' — the dashboard "
+        "requires them.",
     )
 
 
@@ -359,7 +360,7 @@ async def _create_task_from_fields(
     fields: RouterFields,
     header: "_Header | None" = None,
 ) -> dict:
-    """Create a Google task from extracted fields, applying list-hint + due date.
+    """Create a task from extracted fields, applying list-hint + due date.
 
     Two sanctioned writes only: `create_task` (always) and `reschedule` (only when a
     due date was extracted — the g4a date path). Nothing destructive is reachable.
@@ -374,14 +375,16 @@ async def _create_task_from_fields(
         title = header.body.strip().splitlines()[0].strip()
     if not title:
         raise ApiError(422, "empty_title", "Router produced no task title.")
-    list_id = await _resolve_list_id(creds, fields.target_list)
+    # Goal 17: a user not yet imported is imported first (503 → entry re-routable).
+    user = session.get(User, user_id)
+    if user is not None:
+        await ensure_ready(session, user, creds)
+    list_id = _resolve_list_id(session, user_id, fields.target_list)
 
     # 1) create (lands undated in NO_DATE) — the router's primary write. Notes are
     #    intentionally dropped: writing them would need `update_content`, which is NOT
     #    a sanctioned router write (create-only). A reviewer can add notes by hand.
-    created = await writes_svc.create_task(
-        session, creds, user_id, list_id, title, rank=None
-    )
+    created = await writes_svc.create_task(session, user_id, list_id, title, rank=None)
 
     # 2) set the due date via the g4a reschedule path (metadata write, non-destructive).
     #    The header's unambiguous relative date backstops a null LLM due_date.
@@ -389,7 +392,6 @@ async def _create_task_from_fields(
     if due_date:
         await writes_svc.reschedule(
             session,
-            creds,
             user_id,
             tasklist_id=list_id,
             task_id=created["id"],

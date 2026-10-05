@@ -1,23 +1,32 @@
 ---
-paths: ["backend/app/writes/**", "backend/app/google/tasks.py", "backend/app/google/docs.py", "backend/app/google/bootstrap.py", "backend/app/threads/**"]
+paths: ["backend/app/writes/**", "backend/app/tasks_store/**", "backend/app/google/tasks.py", "backend/app/google/docs.py", "backend/app/google/bootstrap.py", "backend/app/threads/**"]
 ---
 
-# Google write safety (goal 4+)
+# Write safety (goal 4+; task writes local since goal 17)
 
-Google writes begin in goal 4. They are the only mutations in the system that leave the local
-DB — treat them with more care than overlay writes. Read this before editing the write layer.
+Google writes began in goal 4. **Since goal 17 task writes are local DB writes** — tasks and lists
+live in the app's own store (`app/tasks_store/`), and no Google Tasks call is reachable from the
+write layer. The remaining Google writes are the Docs/Drive notes surface (below), which are the
+only mutations that leave the local DB — treat them with more care. Read this before editing the
+write layer.
 
 ## Layering
 
-- `app/google/tasks.py` holds **thin write wrappers** — one Google API call each, no
-  orchestration, no DB access, no overlay logic: `update_due_date`, `insert_task`,
-  `delete_task`, `update_task_content` (title/notes/status), `update_tasklist` (list rename)
-  (plus the read helper `get_task` used by the writes service). Same sync `_fn` / `async def` +
-  `asyncio.to_thread(...)` split as the read functions.
-- `app/writes/service.py` owns **orchestration**: it sequences Google calls and overlay-row
-  updates, validates inputs, and decides what (if anything) to write: `reschedule`, `move`
-  (g4); `create_task`, `update_content`, `delete`, `rename_list` (g4a); `append_note` (g7).
-  Routers stay thin and call the writes service.
+- `app/tasks_store/service.py` is the **only module that queries or mutates task rows** (`Task` /
+  `TaskList`, string ids, every function scoped by `user_id`). Imported rows keep their Google ids;
+  rows created afterwards get an app-minted `secrets.token_urlsafe` id (`new_id()`). It hands back
+  the same dict shape the old Google reshape produced, so the overlay merge and frontend are
+  unchanged.
+- `app/google/tasks.py` is **import-only** now: just `fetch_for_import`, called only by
+  `app/tasks_store/importer.py` (the one-time per-user Google import). An AST test
+  (`tests/test_tasks_import.py::test_only_the_importer_imports_google_tasks`) pins the importer as
+  its only importer.
+- `app/writes/service.py` owns **orchestration**: it validates inputs, applies the bucket rules,
+  and decides what (if anything) to write: `reschedule`, `move` (g4); `create_task`,
+  `update_content`, `delete`, `rename_list` (g4a); `append_note` (g7). The task functions take
+  **no `creds`** — they write the local store via `tasks_store.service`. Routers stay thin and call
+  the writes service; task endpoints depend on `tasks_store.deps.tasks_ready` (imports a
+  not-yet-imported user inline, else `503 tasks_import_pending`).
 - `app/google/docs.py` (g7) is the **thin Docs/Drive client** — one Google call each:
   `insert_note` (Docs `documents.batchUpdate`, insert-only — H3 heading + verbatim body + a trailing
   empty paragraph styled as a light-gray `borderBottom` delimiter (g7a); still ONE `batchUpdate`, no
@@ -26,68 +35,67 @@ DB — treat them with more care than overlay writes. Read this before editing t
   sanctioned file-create, used by the `app.google.bootstrap` command). It **never** calls
   `files.delete` or a content-overwriting `files.update` — the AST test pins that surface.
 
-## The Google fields that may be written (goal 4a)
+## The task fields that may be written (goal 4a; local store since goal 17)
 
-- **Task metadata** (g4): due date, list membership.
-- **Task content** (g4a): title, notes, and `status` (complete/uncomplete rides `status`).
-- **Tasklist** (g4a): list title, via `update_tasklist` (the one write to the tasklists
-  resource).
-- **Never to Google:** rank and grouping stay overlay-only; Google always sees a flat list.
+- **Task metadata** (g4): due date, list membership (`tasklist_id`).
+- **Task content** (g4a): title, notes, and `status` (complete/uncomplete rides `status`;
+  `store.set_status` keeps `completed_at` in step).
+- **Tasklist** (g4a): list title (`rename_list`).
+- **Rank and group** are columns on `Task` (the overlay folded in); the overlay PATCH writes them
+  via `overlay_svc.upsert_overlay`.
+- **Never to Google:** nothing about tasks is written to Google any more.
 
 Each content/status edit is optimistic with a pre-op snapshot; on failure → rollback + error
-toast (never swallowed). Same-value title/notes/status is a no-op skipped client-side. The two
-sentinels — `app.writes.service._UNSET` and `app.google.tasks._UNSET` — are intentionally
-separate objects: the service forwards only set fields so the wrapper's own default governs the
-patch body.
+toast (never swallowed). Same-value title/notes/status is a no-op skipped client-side.
+`app.writes.service._UNSET` is the "field not sent" sentinel: only fields explicitly provided are
+written.
 
 ## Invariants
 
-- **Idempotent.** A reschedule whose target due-date bucket equals the task's current bucket
-  skips the Google due-date write (the overlay upsert is naturally idempotent). A move to the
-  current list is rejected (400) — the client blocks it too.
-- **Insert before delete (move).** Cross-list move = insert a copy into the target list, then —
-  only after the insert returns a new task id — delete the original. Never delete first.
-- **`move` may reschedule on the insert leg (goal 6).** `move` takes an optional `due_date` and
+- **Idempotent.** A reschedule just sets the task's `due` / `rank` / `group_id` columns, so a
+  same-bucket reschedule is naturally a no-op on the due. A move to the current list is rejected
+  (400) — the client blocks it too.
+- **Move is an in-place update (goal 17).** A cross-list move is one `UPDATE` of the task row's
+  `tasklist_id` (plus `position` = top of the target list, `due`, `rank`, `group_id`). **The task
+  keeps its id** — the response still carries `new_task_id`, always equal to the request's task id,
+  so clients need no change. No insert-then-delete, no id repointing (thread links and groups stay
+  valid). An unknown target list → 404 `list_not_found`.
+- **`move` may reschedule in the same write (goal 6).** `move` takes an optional `due_date` and
   `group_id` so a cross-list drag that also changes the date bucket / lands in a group is **one
-  orchestrated write**, not two chained calls that can half-fail. Semantics:
-  - `due_date is _UNSET` (omitted by the router when the request has no `due_date` key) → the copy
-    **preserves the source task's due**; an explicit value sets it on the insert body (`None` →
-    omit `due` → `NO_DATE`). Rollback rules are unchanged — the reschedule rides the same insert.
+  write**, not two chained calls that can half-fail. Semantics:
+  - `due_date is _UNSET` (omitted by the router when the request has no `due_date` key) → the task
+    **keeps its due**; an explicit value sets it (`None` → `NO_DATE`).
   - `group_id` (when not None) must reference a group in the **destination** `(target_list, bucket)`
-    where `bucket = due_date or NO_DATE` if provided, else the source task's current bucket — else
-    **422**, raised *before* any Google write. It is set on the migrated overlay row (the g4 move
-    always ungrouped; now it honours the drop target). Menu-move callers pass neither → identical
-    to g4 behavior.
-- **`delete_task` has exactly TWO sanctioned callers (g4a):** (1) the **move** orchestration,
-  only after a confirmed successful insert; (2) the **user `delete` endpoint**
-  (`writes.service.delete`). No other code path may call it. In move, if the delete fails *after*
-  a successful insert, do **not** retry-delete blindly — surface the duplicate to the caller (the
-  task now exists in both lists; losing it is worse than a visible duplicate).
-  **The goal-5 auto-router is NOT a third `delete_task` caller** — its write path is create-only
-  (next bullet). **Neither is threads (goal 14)** — unlinking a next step or archiving a thread
-  leaves the task in its list.
+    where `bucket = due_date or NO_DATE` if provided, else the task's current bucket — else
+    **422**, raised *before* any write. It is set on the task row (None = ungrouped). Menu-move
+    callers pass neither.
+- **Task delete is user-only.** `writes.service.delete` is called only by the user `DELETE
+  /tasks/{list}/{task}` endpoint. **The goal-5 auto-router never deletes** — its write path is
+  create-only (next bullet). **Neither does threads (goal 14)** — unlinking a next step or archiving
+  a thread leaves the task in its list.
 - **`create_task` has TWO sanctioned callers (goal 5):** (1) the **user create endpoint**
   (`POST /tasks/{list}`); (2) the **auto-router** (`app.router.service`), which creates a task from a
-  routed capture. The router's *entire* Google-write surface is **`create_task` + `reschedule`** (the
-  g4a date path, to set the new task's due date) — both create/metadata, nothing destructive. Routing
-  may **never** call `delete_task`, the complete/uncomplete `status` write, or `update_content`. This
-  create-only contract lives in `.claude/rules/router.md` and is asserted by a router write-path test
-  (the router's write dependency set is exactly `{create_task, reschedule, append_note}` from g7).
+  routed capture. The router's *entire* task-write surface is **`create_task` + `reschedule`** (the
+  g4a date path, to set the new task's due date) — both create/metadata, nothing destructive; local
+  store writes since goal 17. Routing may **never** call `delete`, the complete/uncomplete `status`
+  write, or `update_content`. This create-only contract lives in `.claude/rules/router.md` and is
+  asserted by a router write-path test (the router's write dependency set is exactly
+  `{create_task, reschedule, append_note}` from g7).
 - **Threads is the third `create_task` caller (goal 14)** — so the callers are: user create
   endpoint, auto-router, threads (`app.threads.service.set_next`, which creates a thread's next step
   in a pinned list). Threads also calls `update_content` (next-step label/note, and completion via
   `status`), `reschedule` (next-step due) and `move` (switching My Tasks ↔ Follow-ups). Its write
   dependency set is exactly **`{create_task, update_content, reschedule, move}`**, AST-pinned in
-  `tests/test_threads.py`; it never references `delete_task` or `writes_svc.delete`. Google write
-  first, DB write second in the same request — an orphan task is the accepted failure mode. Rules:
-  `.claude/rules/threads.md`.
+  `tests/test_threads.py`; it never references `writes_svc.delete` or `app.google.tasks`. Task
+  write first (committed), step write second in the same request — an orphan task is the accepted
+  failure mode. Rules: `.claude/rules/threads.md`.
 - **`append_note` is a router-only caller (goal 7).** `writes.service.append_note(doc_id, folder_id,
   body_text, summary=None)` is the notes writer: it appends a captured note **insert-only** to the top
   of the configured Doc under an H3 timestamp (`format_note_heading`). Its **only** caller is
   `app.router.service` (the high-confidence `note` path + confirm-as-note in review). It is
   **insert-only forever** — never a Docs delete, never a content overwrite, never a status/content
-  task write. The `delete_task` two-caller rule and the `create_task` two-caller rule both stand
-  unchanged; `append_note` adds a *new* surface, it doesn't widen the task-write callers.
+  task write. The task-write caller rules above stand unchanged; `append_note` adds a *new*
+  surface, it doesn't widen the task-write callers.
   **Goal 7c:** the Doc entry gains **one LLM-authored line** — the classifier's `summary` one-liner,
   rendered **bold** between the timestamp and the **still-verbatim** raw text (`insert_note`'s
   `summary_text` arg). The raw body stays verbatim; the summary is the *only* generated line; an
@@ -102,27 +110,26 @@ patch body.
   routed only after a successful append). Doc/folder IDs are **config-only** (`NOTES_DOC_ID` /
   `NOTES_FOLDER_ID` env), never from LLM output or request payloads.
 - **Completion writes immediately; delete defers (g4a).** Completion (`status` patch) is
-  non-destructive — Google retains completed tasks and uncomplete is cheap — so the write fires
+  non-destructive — the store keeps completed tasks and uncomplete is cheap — so the write fires
   now; the undo-toast is mis-click recovery. **Delete is the only genuinely irreversible op**, so
   the deferral lives entirely in the **frontend**: the optimistic remove + ~5s undo-toast hold the
-  `DELETE` until the window closes; Undo cancels it with **zero Google writes** (the backend
-  `delete` endpoint is simply never called). The backend `delete` is immediate when invoked.
-- **Rollback, not retry.** On any partial failure, raise a clean `ApiError`; do not retry the
-  Google call in a loop. The frontend owns rollback (snapshot restore + toast). Never swallow a
-  Google-write error — unlike overlay writes, these are not fire-and-forget.
+  `DELETE` until the window closes; Undo cancels it with **zero writes** (the backend `delete`
+  endpoint is simply never called). The backend `delete` is immediate when invoked.
+- **Rollback, not retry.** On any failure, raise a clean `ApiError`; do not retry in a loop. The
+  frontend owns rollback (snapshot restore + toast). Never swallow a task-write or Docs-write
+  error — unlike overlay (rank/group) PATCHes, these are not fire-and-forget.
 - **Group scope on reschedule.** A `group_id` passed to reschedule must reference a group in the
   **destination** bucket `(tasklist_id, target_bucket_key)`; otherwise 422. A cross-bucket move
-  touches only the dragged task's overlay row (`group_id` → destination group or NULL); source
-  group siblings are never modified.
-- **Overlay-row migration on move.** After a successful move, migrate the overlay row to the new
-  `(tasklist_id, new_task_id)` key (rank = the request's `rank` or default, `group_id` = the
-  request's `group_id` — `NULL` unless a goal-6 cross-list drag dropped into a destination group)
-  and delete the old row.
+  touches only the dragged task's row (`group_id` → destination group or NULL); source group
+  siblings are never modified.
+- **Rank/group ride the task row on move.** The moved task's `rank` = the request's `rank`,
+  `group_id` = the request's `group_id` (`NULL` unless a goal-6 cross-list drag dropped into a
+  destination group). There is no overlay row to migrate.
 
 ## Scope / auth
 
-Writes need the read/write `https://www.googleapis.com/auth/tasks` scope (not `tasks.readonly`).
-Notes writing (g7) needs **`drive.file` — and only `drive.file`**, never `documents`/`drive` (ADR:
+Task writes need no Google scope since goal 17; the `https://www.googleapis.com/auth/tasks` scope
+stays in `SCOPES` only for the one-time importer (dropped in goal 17b). Notes writing (g7) needs **`drive.file` — and only `drive.file`**, never `documents`/`drive` (ADR:
 `docs/goals/architecture/drive-access-scoping.md`). Scopes live in `app.google.auth.SCOPES`;
 changing them requires re-running `uv run python -m app.google.auth` to re-mint a token. Never run
 the consent flow from request-handling code.
@@ -135,14 +142,17 @@ refreshes cleanly after `SCOPES` grows.
 
 ## Goal 8: per-user credentials + per-user notes target
 
-- **`creds` is passed explicitly, first arg.** Every `app/google/*` call and every writes-service
-  function now takes a live `creds: Credentials` (the current user's). Routers get it from
+- **`creds` is passed explicitly, first arg.** Every `app/google/*` call (and `append_note`) takes
+  a live `creds: Credentials` (the current user's). Routers get it from
   `Depends(get_current_credentials)`; the writes service forwards it into the thin client wrappers.
+  **Goal 17:** the task functions of the writes service take no `creds` (local store).
   There is no global `load_credentials()` — it is now `app.google.auth.load_credentials(session, user)`
   and the scope assertion is **per-token** (a broader-than-allowlist grant → `ScopeError` → 403),
   no longer a startup boot check.
-- **Overlay writes are user-scoped.** `upsert_overlay` / `get_group` / etc. take `user_id`;
-  `session.get(TaskOverlay, (user_id, tasklist_id, task_id))` (composite PK now includes `user_id`).
+- **Overlay writes are user-scoped.** `upsert_overlay` / `get_group` / etc. take `user_id`. Since
+  goal 17 `upsert_overlay` sets `rank` / `group_id` on the `Task` row (looked up via
+  `tasks_store.service.get_task`, filtered by `user_id`; a missing task → `None` → 404). The
+  `task_overlay` table is legacy, read only by the importer (dropped in goal 17b).
 - **`append_note(creds, doc_id, folder_id, body_text, summary=None)`** — the doc/folder ids come from
   the **user's `user_settings`** (resolved by `app.settings.service.ensure_notes_target`, which
   app-creates the folder + Doc on first need), never env vars. Still insert-only, still router-only,

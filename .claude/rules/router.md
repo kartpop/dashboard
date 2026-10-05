@@ -11,12 +11,18 @@ under `backend/app/router/`.
 ## The contract (LLM-proposes / code-disposes)
 
 - **No write lives in the LLM path.** `classifier.py` returns a `RouterClassification` and
-  nothing else — it imports the Anthropic SDK, never `app.writes` or `app.google`. Every Google
-  write is in `service.py`. If you find yourself importing a writer into `classifier.py`, stop.
-- **Insert-only blast radius (goal 7).** The router's *entire* Google-write dependency set is
+  nothing else — it imports the Anthropic SDK, never `app.writes` or `app.google`. Every write
+  (task-store or Google Docs) is in `service.py`. If you find yourself importing a writer into `classifier.py`, stop.
+- **Insert-only blast radius (goal 7).** The router's *entire* write dependency set is
   exactly **`{create_task, reschedule, append_note}`** — the AST test pins it.
   - **`writes_svc.create_task`** (task content) + **`writes_svc.reschedule`** (the g4a date path to
-    set the new task's due date — non-destructive metadata).
+    set the new task's due date — non-destructive metadata). **Goal 17:** both now target the
+    **local task store** (no `creds`, no Google Tasks call); the router must not import
+    `app.google.tasks` (`test_router_does_not_import_the_google_tasks_client`).
+    `_resolve_list_id(session, user_id, target_list)` reads the pinned lists from the store
+    (`store.get_tasklist_refs`), and `_create_task_from_fields` calls
+    `tasks_store.deps.ensure_ready` first — a user not yet imported is imported, and a failed import
+    (`503 tasks_import_pending`) leaves the entry re-routable.
   - **`writes_svc.append_note`** (goal 7): a high-confidence `note` is appended **insert-only** to
     the top of the configured notes Doc under an H3 timestamp. **Never a Docs delete or
     overwrite** — `append_note` only inserts. **Goal 7c amendment:** the Doc entry now carries
@@ -24,9 +30,9 @@ under `backend/app/router/`.
     and the body). The *raw text stays verbatim*; the summary is the only generated line. The write
     set and insert-only contract are **unchanged** (still `append_note`, no new writer); a
     missing/empty summary degrades to the goal-7 shape.
-  Routing must **NEVER** reach `delete_task`, the complete/uncomplete status write, `update_content`,
-  or any `files.delete` / `files.update` content rewrite. The router is **not** a sanctioned
-  `delete_task` caller (writes.md's two callers stand; the router is not a third).
+  Routing must **NEVER** reach a task delete (`writes_svc.delete`), the complete/uncomplete status
+  write, `update_content`, or any `files.delete` / `files.update` content rewrite. Task delete is
+  user-endpoint-only (writes.md).
 - **Confidence gate.** A `task` or `note` is auto-acted only when `confidence >= CONFIDENCE_THRESHOLD`
   (`config.py`). Below threshold → review queue, never an auto-write.
 - **Schema gate.** The classifier output must validate against `RouterClassification`. A model error,
@@ -45,7 +51,7 @@ under `backend/app/router/`.
 
 - `classifier.py` — the runtime LLM (structured output). No writes, no DB.
 - `service.py` — deterministic dispose: reads the classification, performs/withholds writes,
-  persists `routing_state`, builds review items. A Google-write failure leaves the entry `UNROUTED`
+  persists `routing_state`, builds review items. A write failure leaves the entry `UNROUTED`
   (re-routable) and raises `ApiError` — never swallowed, never half-written.
   - **Classify/dispose split (goal 9).** `classify_text(session, user_id, text)` is the pure LLM
     step (no DB write, no Google write); `route_entry(..., classification=None)` disposes it and
@@ -188,7 +194,8 @@ not atomic.
 
 Routing is per-user. `route_entry(session, user, creds, entry)` /
 `route_unrouted(session, user, creds)` / `confirm_review(session, user, creds, item_id, ...)` take
-the current `User` + their live `creds`; every Google call uses those creds and every
+the current `User` + their live `creds`; every Google call (notes; since goal 17 tasks are local)
+uses those creds and every
 `scratch_entry` / `review_item` is written/read with `user_id`. The notes Doc is the **user's own**,
 resolved via `app.settings.service.ensure_notes_target(session, creds, user_id)` (app-created folder +
 Doc on first need) — the `NOTES_DOC_ID`/`NOTES_FOLDER_ID` env vars and the "kept-local when unset"

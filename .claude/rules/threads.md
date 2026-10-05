@@ -2,11 +2,11 @@
 paths: ["backend/app/threads/**", "frontend/src/panels/threads/**"]
 ---
 
-# Threads (goal 14, 14a) — link, reconcile, repoint
+# Threads (goal 14, 14a, 17) — link, reconcile
 
 A thread is an ordered list of steps. **Done** steps are local history. After them comes the
-**open block**: any number (goal 14a) of **next** steps, each a link to a real Google Task in a
-pinned list (`My Tasks` = my move, `Follow-ups` = their move). Open steps are parallel — no
+**open block**: any number (goal 14a) of **next** steps, each a link to a real task (in the app's
+task store since goal 17) in a pinned list (`My Tasks` = my move, `Follow-ups` = their move). Open steps are parallel — no
 sequencing between them. Briefs: `docs/goals/goal-14.md`, `docs/goals/goal-14a.md`.
 
 ## Invariants (service-enforced, DB-backed where cheap)
@@ -18,44 +18,51 @@ sequencing between them. Briefs: `docs/goals/goal-14.md`, `docs/goals/goal-14a.m
 - **Display order is derived, not stored:** `serialize_thread` serves done steps by rank, then the
   open block by due ascending (undated last), ties by rank. The frontend's `orderSteps` mirrors it
   for optimistic updates; read open steps with `openOf` / `soonestOpen`, never "the last step".
-- **A Google task is linked by at most one next step per user.** Partial unique index
+- **A task is linked by at most one next step per user.** Partial unique index
   `uq_thread_step_next_task` (`user_id, task_id WHERE kind='next'`) — works on SQLite and Postgres.
-- **Google is the source of truth** for a next step's title / notes / due. The row caches them;
-  the step note *is* the task's description (same field).
+- **The task store is the source of truth** for a next step's title / notes / due (goal 17; it
+  was Google before). The row caches them; the step note *is* the task's description (same field).
 - **`via`** holds the pinned list (`mine`/`follow`) the linked task is in. On a next step the API
   exposes it as `list`; once the step is done it's frozen and exposed as `via` (the "via
   Follow-ups" caption). Reconcile refreshes it while the step is next.
 
 ## Writes (see writes.md)
 
-- The threads service's whole Google-write surface is **`writes_svc.{create_task, update_content,
-  reschedule, move}`** — AST-pinned in `tests/test_threads.py`. It calls `tasks_client` for reads
-  only (`get_task_lists`, `get_tasklist_refs`).
-- **Never `delete_task`.** Unlinking a next step (`DELETE …/steps/{sid}`) and archiving a thread
+- The threads service's whole task-write surface is **`writes_svc.{create_task, update_content,
+  reschedule, move}`** — AST-pinned in `tests/test_threads.py` (which also asserts threads never
+  imports `app.google.tasks`). Reads go through `tasks_store.service` (`get_task_lists`,
+  `get_tasklist_refs` for `_resolve_list_id`). No `creds` anywhere in the threads service.
+- **Never deletes a task.** Unlinking a next step (`DELETE …/steps/{sid}`) and archiving a thread
   leave the task in its list.
-- **Google first, DB second, same request.** A `create_task` failure writes no row. A DB failure
-  after a successful create is logged and 500s: an orphan task in a list is the accepted failure
-  mode (reconcile can't recover an unlinked task).
+- **Task first, step second, same request.** A `create_task` failure writes no row. A DB failure
+  linking the step after a successful (committed) create is logged and 500s
+  (`thread_link_failed`): an orphan task in a list is the accepted failure mode (reconcile can't
+  recover an unlinked task).
 - `update_step` on a next step: label/note → `update_content`, due → `reschedule`, list → `move`
-  (which carries a due change on its insert leg). Each successful Google write is committed before
-  the next one, so a later failure leaves the cache true.
+  (which carries a due change in the same write). Each successful write is committed before the
+  next one, so a later failure leaves the cache true.
+- The write endpoints (`set_next`, `update_step`, `complete_step`) depend on
+  `tasks_store.deps.tasks_ready` (import gate, `503 tasks_import_pending`); `GET /threads` does not.
 
 ## Reconcile (`GET /threads`)
 
-One `get_task_lists` fetch (skipped when no step is linked) indexes every task by id, then:
+A cheap local join (goal 17): one `store.get_task_lists(session, user_id)` read (skipped when no
+step is linked, and **skipped for a user not yet imported** — against an empty store every link
+would read as deleted, so the cached steps are served) indexes every task by id, then:
 completed → done (dated by `completed` in IST, else today; label/note snapshotted; several in one
 pass flip in completion order); **any** done step whose task is `needsAction` again → next again at
 the end of the open block, unless another next step links that task (undo after a reconcile);
-missing → that next step is deleted (the thread dangles only if none are left); open → refresh the
-cache. A failed fetch serves the cached state (logged), never an error.
+missing → that next step is deleted (the thread dangles only if none are left; this also covers an
+open step whose task wasn't imported); open → refresh the cache. It runs on every `GET /threads`, so
+a completed linked task flips its step on the very next fetch. (The goal-14 "Google fetch failed →
+serve cache" fallback is gone — there is no remote fetch.)
 
-## Repoint on move
+## Moves keep the link (goal 17)
 
-A move is insert-then-delete, so the task id changes. The tasks `move` endpoint calls
-`threads_svc.repoint_link(session, user_id, old_list, old_id, new_list, new_id)` after a successful
-move (covers the menu move and pinned-pair drag), and `update_step`'s list switch does the same.
-**v0 limitation:** a move made *outside* the dashboard (e.g. in the Google Tasks app) looks like a
-deletion — the next step is removed and the thread dangles. Detecting it is out of scope.
+A move is an in-place update, so **the task id never changes** — a link survives a menu move or a
+pinned-pair drag with no repointing (`repoint_link` was deleted). `update_step`'s list switch sets
+the step's own `tasklist_id` / `via` after the `move`. Reconcile also refreshes a next step's
+`tasklist_id` / `via` from the task's current list.
 
 ## Frontend coupling (DashboardPage owns both hooks)
 
@@ -68,11 +75,13 @@ deletion — the next step is removed and the thread dangles. Detecting it is ou
   (or **Show thread** with "N still open" when siblings remain) beside **Undo**, and Undo calls
   `revertLinkedCompleted`. The backend learns about the completion via reconcile — no extra write.
 - Other tasks-panel writes on a linked task (`onTaskWritten`) trigger a threads refresh rather than
-  duplicated optimistic logic; threads writes that touch Google call `onTasksChanged` → the tasks
+  duplicated optimistic logic; threads writes that touch a task call `onTasksChanged` → the tasks
   refresh.
 - Outside requests (badge click, Set next step) arrive as `threads.request` (nonce-guarded) and
   the panel consumes them during render (the "adjust state on prop change" pattern), not in an
-  effect. Polling (45s) is held while a form or popover is open.
+  effect. Polling (45s, via `usePoll` — paused while the tab is hidden, one catch-up tick when it
+  becomes visible, `apiPollGet` drops a result that raced a write) is held while a form or popover
+  is open.
 - **Phone (goal 15, `ThreadsPanel mobile`):** always the compact list (view toggle + panel refresh
   hidden; refresh lives in the Home header). Rows are `MobileThreadRow` — collapsed: title · age ·
   ⋯ over the soonest open step in full + pill + "+N steps"; expanded: a vertical list (open steps,

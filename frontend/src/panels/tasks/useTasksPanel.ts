@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiDelete, apiGet, apiPatch, apiPost } from "../../api";
+import {
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPollGet,
+  apiPost,
+  HttpError,
+} from "../../api";
+import { usePoll } from "../../usePoll";
 
 export interface Task {
   type: "task";
@@ -49,6 +57,7 @@ const ACTION_TOAST_MS = 5000;
 // edits) surface without a manual refresh. Silent refetch; paused while an
 // undo-toast window is open (see the polling effect).
 const POLL_MS = 45_000;
+const IMPORT_RETRY_MS = 5_000;
 
 export interface Group {
   type: "group";
@@ -424,29 +433,38 @@ export function useTasksPanel(options: TasksPanelOptions = {}) {
   // Initial load. The fetch is async (setState fires in its callbacks, not
   // synchronously in the effect body), and initial state is already
   // `isLoading: true`, so there is no synchronous setState in the effect.
+  // Goal 17: a 503 means this user's one-time task import is still running (or
+  // failed and will be retried) — show that and retry every few seconds.
   useEffect(() => {
     let cancelled = false;
-    apiGet<TasksResponse>("/tasks?view=grouped")
-      .then((data) => {
-        if (!cancelled)
-          setState((s) => ({
-            ...s,
-            taskLists: data.task_lists,
-            isLoading: false,
-            error: null,
-          }));
-      })
-      .catch((err: Error) => {
-        if (!cancelled)
+    let retry: number | undefined;
+    const attempt = () => {
+      apiGet<TasksResponse>("/tasks?view=grouped")
+        .then((data) => {
+          if (!cancelled)
+            setState((s) => ({
+              ...s,
+              taskLists: data.task_lists,
+              isLoading: false,
+              error: null,
+            }));
+        })
+        .catch((err: Error) => {
+          if (cancelled) return;
+          const importing = err instanceof HttpError && err.status === 503;
           setState((s) => ({
             ...s,
             taskLists: [],
             isLoading: false,
-            error: err.message,
+            error: importing ? "Importing your tasks…" : err.message,
           }));
-      });
+          if (importing) retry = window.setTimeout(attempt, IMPORT_RETRY_MS);
+        });
+    };
+    attempt();
     return () => {
       cancelled = true;
+      window.clearTimeout(retry);
     };
   }, []);
 
@@ -538,17 +556,26 @@ export function useTasksPanel(options: TasksPanelOptions = {}) {
   // delete that the user neither undid nor waited out).
   useEffect(() => () => commitPending(), [commitPending]);
 
-  // Periodic silent refetch so scheduler-created tasks appear on their own. A
-  // tick is SKIPPED while an undo-toast window is open: a deferred delete holds
-  // its Google DELETE until the window closes, so a refetch then would fetch the
-  // still-present task and briefly resurrect it under the toast.
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      if (toastTimerRef.current !== null) return;
-      refetchSilently().catch(() => {});
-    }, POLL_MS);
-    return () => window.clearInterval(id);
-  }, [refetchSilently]);
+  // Periodic silent refetch so scheduler-created tasks (and edits from another
+  // device) appear on their own. Paused while the tab is hidden (usePoll). A tick is
+  // SKIPPED while an undo-toast window is open: a deferred delete holds its DELETE
+  // until the window closes, so a refetch then would briefly resurrect the task. A
+  // poll that raced a write is dropped (apiPollGet) so it can't undo an optimistic
+  // change.
+  usePoll(() => {
+    if (toastTimerRef.current !== null) return;
+    apiPollGet<TasksResponse>("/tasks?view=grouped")
+      .then((data) => {
+        if (data && toastTimerRef.current === null)
+          setState((s) => ({
+            ...s,
+            taskLists: data.task_lists,
+            isLoading: false,
+            error: null,
+          }));
+      })
+      .catch(() => {});
+  }, POLL_MS);
 
   // Manual per-panel refresh (re-run GET /tasks) — surfaces phone-app changes
   // and a recurring task's next instance after completion.

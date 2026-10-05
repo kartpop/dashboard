@@ -1,118 +1,80 @@
 """Goal 14 — Threads: storage, reconcile, link writes, isolation, write surface.
 
-Google is a small in-memory fake (two pinned lists + one other) patched over the
-`app.google.tasks` wrappers, so the writes service runs for real on top of it and
-every Google call is recorded.
+Goal 17: tasks live in the local store, so the writes service runs for real against
+the DB. The `tasks` fixture seeds user A's three lists (two pinned + one other);
+"the task changed elsewhere" is a direct `Task` row edit (or a `/tasks/...` call)
+followed by `GET /threads`, which reconciles. The `writes` spy records every
+writes-service call the threads service makes.
 """
 
 from __future__ import annotations
 
 import ast
 import inspect
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 from sqlmodel import select
 
-from app.google.tasks import _UNSET, _reshape_task
+from app.errors import ApiError
 from app.threads import router as threads_router
 from app.threads import service as threads_svc
-from app.threads.models import ThreadStep
-
-MINE, FOLLOW, OTHER = "L_MINE", "L_FOLLOW", "L_OTHER"
-
-
-class FakeGoogle:
-    def __init__(self):
-        self.lists: dict[str, dict] = {
-            MINE: {"title": "My Tasks", "tasks": {}},
-            FOLLOW: {"title": "Follow-ups", "tasks": {}},
-            OTHER: {"title": "Groceries", "tasks": {}},
-        }
-        self.calls: list[tuple] = []
-        self.insert_error: Exception | None = None
-        self._n = 0
-
-    # reads
-    async def get_task_lists(self, creds):
-        self.calls.append(("get_task_lists",))
-        return [
-            {
-                "id": lid,
-                "title": tl["title"],
-                "tasks": [_reshape_task(t) for t in tl["tasks"].values()],
-            }
-            for lid, tl in self.lists.items()
-        ]
-
-    async def get_tasklist_refs(self, creds):
-        self.calls.append(("get_tasklist_refs",))
-        return [{"id": lid, "title": tl["title"]} for lid, tl in self.lists.items()]
-
-    async def get_task(self, creds, tasklist_id, task_id):
-        self.calls.append(("get_task", tasklist_id, task_id))
-        task = self.lists.get(tasklist_id, {}).get("tasks", {}).get(task_id)
-        return _reshape_task(task) if task else None
-
-    # writes
-    async def insert_task(self, creds, tasklist_id, body):
-        self.calls.append(("insert_task", tasklist_id, body))
-        if self.insert_error:
-            raise self.insert_error
-        self._n += 1
-        task = {"id": f"T{self._n}", "status": "needsAction", **body}
-        self.lists[tasklist_id]["tasks"][task["id"]] = task
-        return _reshape_task(task)
-
-    async def delete_task(self, creds, tasklist_id, task_id):
-        self.calls.append(("delete_task", tasklist_id, task_id))
-        self.lists[tasklist_id]["tasks"].pop(task_id, None)
-
-    async def update_task_content(
-        self, creds, tasklist_id, task_id, title=_UNSET, notes=_UNSET, status=_UNSET
-    ):
-        body = {}
-        if title is not _UNSET:
-            body["title"] = title
-        if notes is not _UNSET:
-            body["notes"] = notes
-        if status is not _UNSET:
-            body["status"] = status
-        self.calls.append(("update_task_content", tasklist_id, task_id, body))
-        task = self.lists[tasklist_id]["tasks"][task_id]
-        task.update(body)
-        return _reshape_task(task)
-
-    async def update_due_date(self, creds, tasklist_id, task_id, due):
-        self.calls.append(("update_due_date", tasklist_id, task_id, due))
-        task = self.lists[tasklist_id]["tasks"][task_id]
-        if due is None:
-            task.pop("due", None)
-        else:
-            task["due"] = due
-
-    # helpers
-    def task(self, list_id, task_id) -> dict | None:
-        return self.lists[list_id]["tasks"].get(task_id)
-
-    def names(self):
-        return [c[0] for c in self.calls]
+from app.threads.models import Thread, ThreadStep
+from app.writes import service as writes_mod
+from tests.conftest import FOLLOW, MINE
 
 
 @pytest.fixture
-def google(monkeypatch):
-    fake = FakeGoogle()
-    for name in (
-        "get_task_lists",
-        "get_tasklist_refs",
-        "get_task",
-        "insert_task",
-        "delete_task",
-        "update_task_content",
-        "update_due_date",
-    ):
-        monkeypatch.setattr(f"app.google.tasks.{name}", getattr(fake, name))
-    return fake
+def tasks(store, user_a):
+    """User A's three lists (My Tasks, Follow-ups, Groceries) in the local store."""
+    store.lists(user_a)
+    return store
+
+
+@pytest.fixture
+def writes(monkeypatch) -> list[tuple[str, dict]]:
+    """Record (name, kwargs) for every task write, still running the real one."""
+    calls: list[tuple[str, dict]] = []
+
+    def _spy(name, real):
+        async def spy(*args, **kwargs):
+            calls.append((name, kwargs))
+            return await real(*args, **kwargs)
+
+        return spy
+
+    for name in ("create_task", "update_content", "reschedule", "move", "delete"):
+        monkeypatch.setattr(writes_mod, name, _spy(name, getattr(writes_mod, name)))
+    return calls
+
+
+def _names(calls) -> list[str]:
+    return [c[0] for c in calls]
+
+
+def _set(store, task_id: str, **fields) -> None:
+    """Edit a task row directly — "changed elsewhere" (another tab, the phone)."""
+    task = store.get(task_id)
+    for k, v in fields.items():
+        setattr(task, k, v)
+    store.session.commit()
+
+
+def _complete(store, task_id: str, when: datetime | None) -> None:
+    _set(store, task_id, status="completed", completed_at=when)
+
+
+def _reopen(store, task_id: str) -> None:
+    _set(store, task_id, status="needsAction", completed_at=None)
+
+
+def _delete(store, task_id: str) -> None:
+    store.session.delete(store.get(task_id))
+    store.session.commit()
+
+
+def _utc(*args) -> datetime:
+    return datetime(*args, tzinfo=timezone.utc)
 
 
 def _thread(client, title="Partner pilot") -> dict:
@@ -147,7 +109,7 @@ def _one(client, tid) -> dict:
 # ── Storage + API contract ────────────────────────────────────────────────────
 
 
-def test_create_log_and_set_follow_up_next(client, google):
+def test_create_log_and_set_follow_up_next(client, tasks):
     t = _thread(client)
     assert t["steps"] == [] and t["archived"] is False
     _log(client, t["id"], "Intro call", occurred_on="2026-09-01")
@@ -159,17 +121,18 @@ def test_create_log_and_set_follow_up_next(client, google):
     assert kinds == ["done", "done", "next"]
     nxt = body["steps"][-1]
     assert nxt["list"] == "follow" and nxt["via"] is None
-    assert nxt["due"] == "2026-10-01"
-    # The Google task exists in Follow-ups with the note as its description.
-    task = google.task(FOLLOW, nxt["task_id"])
-    assert task["title"] == "Nudge them"
-    assert task["notes"] == "ask who owns it"
-    assert task["due"] == "2026-10-01T00:00:00.000Z"
+    assert nxt["due"] == "2026-10-01" and nxt["tasklist_id"] == FOLLOW
+    # A real task exists in Follow-ups with the note as its description.
+    task = tasks.get(nxt["task_id"])
+    assert task.tasklist_id == FOLLOW and task.status == "needsAction"
+    assert task.title == "Nudge them"
+    assert task.notes == "ask who owns it"
+    assert task.due == date(2026, 10, 1)
     assert body["steps"][1]["note"] == "asked for feedback"
     assert body["last_moved_on"] >= "2026-09-01"
 
 
-def test_several_open_steps_ordered_by_due(client, google):
+def test_several_open_steps_ordered_by_due(client, tasks, user_a):
     """Goal 14a: a second and third open step succeed; the open block is served by
     due ascending (undated last), after every done step."""
     t = _thread(client)
@@ -188,7 +151,8 @@ def test_several_open_steps_ordered_by_due(client, google):
         ("next", "Email NGO 3"),
     ]
     assert len({s["task_id"] for s in steps[1:]}) == 3
-    assert google.names().count("insert_task") == 3
+    assert len(tasks.tasks(user_a, MINE)) == 2
+    assert len(tasks.tasks(user_a, FOLLOW)) == 1
     # Logging still lands before the whole open block.
     body = _log(client, t["id"], "Called NGO 1")
     assert [s["kind"] for s in body["steps"]] == [
@@ -201,7 +165,7 @@ def test_several_open_steps_ordered_by_due(client, google):
     assert body["steps"][1]["label"] == "Called NGO 1"
 
 
-def test_log_step_inserts_before_next(client, google):
+def test_log_step_inserts_before_next(client, tasks):
     t = _thread(client)
     _log(client, t["id"], "First")
     _next(client, t["id"])
@@ -218,7 +182,7 @@ def test_log_step_inserts_before_next(client, google):
     assert [s["kind"] for s in body["steps"]] == ["done", "next"]
 
 
-def test_log_defaults_to_today_ist(client, google, monkeypatch):
+def test_log_defaults_to_today_ist(client, tasks, monkeypatch):
     monkeypatch.setattr(threads_svc, "today_ist", lambda: date(2026, 9, 29))
     t = _thread(client)
     body = _log(client, t["id"], "Did a thing")
@@ -226,18 +190,20 @@ def test_log_defaults_to_today_ist(client, google, monkeypatch):
     assert body["last_moved_on"] == "2026-09-29"
 
 
-def test_delete_next_unlinks_and_leaves_google_task(client, google):
+def test_delete_next_unlinks_and_leaves_task(client, tasks, writes):
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
     r = client.delete(f"/threads/{t['id']}/steps/{nxt['id']}")
     assert r.status_code == 200
     assert r.json()["unlinked"] is True
     assert r.json()["steps"] == []
-    assert "delete_task" not in google.names()
-    assert google.task(FOLLOW, nxt["task_id"]) is not None
+    assert "delete" not in _names(writes)
+    task = tasks.get(nxt["task_id"])
+    assert task is not None and task.status == "needsAction"
+    assert task.tasklist_id == FOLLOW
 
 
-def test_delete_done_step(client, google):
+def test_delete_done_step(client, tasks):
     t = _thread(client)
     body = _log(client, t["id"], "Oops")
     r = client.delete(f"/threads/{t['id']}/steps/{body['steps'][0]['id']}")
@@ -245,19 +211,20 @@ def test_delete_done_step(client, google):
     assert r.json()["steps"] == []
 
 
-def test_archive_and_restore_leave_google_alone(client, google):
+def test_archive_and_restore_leave_task_alone(client, tasks, writes):
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
-    before = list(google.calls)
+    before = list(writes)
     r = client.patch(f"/threads/{t['id']}", json={"archived": True})
     assert r.status_code == 200 and r.json()["archived"] is True
-    assert google.calls == before  # archive never touches Google
-    assert google.task(FOLLOW, nxt["task_id"]) is not None
+    assert writes == before  # archive never writes a task
+    task = tasks.get(nxt["task_id"])
+    assert task is not None and task.status == "needsAction"
     r = client.patch(f"/threads/{t['id']}", json={"archived": False, "title": "New"})
     assert r.json()["archived"] is False and r.json()["title"] == "New"
 
 
-def test_empty_title_and_label_rejected(client, google):
+def test_empty_title_and_label_rejected(client, tasks):
     assert client.post("/threads", json={"title": "  "}).status_code == 400
     t = _thread(client)
     assert (
@@ -265,26 +232,32 @@ def test_empty_title_and_label_rejected(client, google):
     )
 
 
-def test_create_task_failure_writes_no_step(client, google, session):
+def test_create_task_failure_writes_no_step(client, tasks, session, monkeypatch):
     t = _thread(client)
-    google.insert_error = RuntimeError("boom")
+
+    async def boom(*args, **kwargs):
+        raise ApiError(503, "boom", "create failed")
+
+    monkeypatch.setattr(writes_mod, "create_task", boom)
     r = _next(client, t["id"])
-    assert r.status_code == 502
+    assert r.status_code == 503
     assert session.exec(select(ThreadStep)).all() == []
 
 
-def test_missing_pinned_list_422(client, google):
-    del google.lists[FOLLOW]
+def test_missing_pinned_list_422(client, store, user_a, writes):
+    store.lists(user_a, {MINE: "My Tasks", "L_OTHER": "Groceries"})
     t = _thread(client)
     r = _next(client, t["id"])
     assert r.status_code == 422
-    assert "insert_task" not in google.names()
+    assert r.json()["error"]["code"] == "pinned_list_missing"
+    assert "create_task" not in _names(writes)
+    assert store.tasks(user_a) == []
 
 
 # ── Next-step edits (writes) ──────────────────────────────────────────────────
 
 
-def test_patch_next_label_note_go_to_google(client, google):
+def test_patch_next_label_note_update_task(client, tasks):
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
     r = client.patch(
@@ -294,33 +267,34 @@ def test_patch_next_label_note_go_to_google(client, google):
     assert r.status_code == 200, r.text
     step = r.json()["steps"][-1]
     assert step["label"] == "Nudge #2" and step["note"] == "try their lead"
-    task = google.task(FOLLOW, nxt["task_id"])
-    assert task["title"] == "Nudge #2" and task["notes"] == "try their lead"
+    task = tasks.get(nxt["task_id"])
+    assert task.title == "Nudge #2" and task.notes == "try their lead"
 
 
-def test_patch_next_unchanged_fields_skip_google(client, google):
+def test_patch_next_unchanged_fields_skip_writes(client, tasks, writes):
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
-    before = len(google.calls)
+    before = len(writes)
     r = client.patch(
         f"/threads/{t['id']}/steps/{nxt['id']}",
         json={"label": nxt["label"], "note": nxt["note"], "due": nxt["due"]},
     )
     assert r.status_code == 200
-    assert len(google.calls) == before
+    assert len(writes) == before
 
 
-def test_patch_next_due_reschedules(client, google):
+def test_patch_next_due_reschedules(client, tasks, writes):
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
     r = client.patch(
         f"/threads/{t['id']}/steps/{nxt['id']}", json={"due": "2026-10-09"}
     )
     assert r.json()["steps"][-1]["due"] == "2026-10-09"
-    assert google.task(FOLLOW, nxt["task_id"])["due"] == "2026-10-09T00:00:00.000Z"
+    assert _names(writes)[-1] == "reschedule"
+    assert tasks.get(nxt["task_id"]).due == date(2026, 10, 9)
 
 
-def test_patch_next_list_moves_and_stays_linked(client, google):
+def test_patch_next_list_moves_and_keeps_id(client, tasks, user_a, writes):
     t = _thread(client)
     nxt = _next(client, t["id"], note="n").json()["steps"][-1]
     r = client.patch(
@@ -328,21 +302,25 @@ def test_patch_next_list_moves_and_stays_linked(client, google):
         json={"list": "mine", "due": "2026-10-05"},
     )
     assert r.status_code == 200, r.text
+    assert _names(writes)[-1] == "move" and "reschedule" not in _names(writes)
     step = r.json()["steps"][-1]
     assert step["kind"] == "next" and step["list"] == "mine"
-    assert step["tasklist_id"] == MINE and step["task_id"] != nxt["task_id"]
-    assert google.task(FOLLOW, nxt["task_id"]) is None
-    moved = google.task(MINE, step["task_id"])
-    assert moved["notes"] == "n" and moved["due"] == "2026-10-05T00:00:00.000Z"
+    # Goal 17: a move is in place — same task id, new list.
+    assert step["tasklist_id"] == MINE and step["task_id"] == nxt["task_id"]
+    assert step["due"] == "2026-10-05"
+    assert tasks.tasks(user_a, FOLLOW) == []
+    moved = tasks.get(nxt["task_id"])
+    assert moved.tasklist_id == MINE
+    assert moved.notes == "n" and moved.due == date(2026, 10, 5)
     # And the next reconcile still sees it as the live next step.
     after = _one(client, t["id"])["steps"][-1]
     assert after["kind"] == "next" and after["list"] == "mine"
+    assert (after["tasklist_id"], after["task_id"]) == (MINE, nxt["task_id"])
 
 
-def test_patch_done_step_is_local(client, google):
+def test_patch_done_step_is_local(client, tasks, writes):
     t = _thread(client)
     step = _log(client, t["id"], "Call")["steps"][0]
-    before = len(google.calls)
     r = client.patch(
         f"/threads/{t['id']}/steps/{step['id']}",
         json={"label": "Intro call", "note": "x", "occurred_on": "2026-09-02"},
@@ -353,10 +331,10 @@ def test_patch_done_step_is_local(client, google):
         "x",
         "2026-09-02",
     )
-    assert len(google.calls) == before
+    assert writes == []
 
 
-def test_complete_endpoint_flips_and_completes_task(client, google, monkeypatch):
+def test_complete_endpoint_flips_and_completes_task(client, tasks, monkeypatch):
     monkeypatch.setattr(threads_svc, "today_ist", lambda: date(2026, 9, 29))
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
@@ -365,7 +343,11 @@ def test_complete_endpoint_flips_and_completes_task(client, google, monkeypatch)
     step = r.json()["steps"][-1]
     assert step["kind"] == "done" and step["via"] == "follow"
     assert step["occurred_on"] == "2026-09-29" and step["list"] is None
-    assert google.task(FOLLOW, nxt["task_id"])["status"] == "completed"
+    task = tasks.get(nxt["task_id"])
+    assert task.status == "completed" and task.completed_at is not None
+    # The next reconcile agrees (no flip-back, still dated by the endpoint).
+    after = _one(client, t["id"])["steps"][-1]
+    assert after["kind"] == "done" and after["occurred_on"] == "2026-09-29"
     # Completing a done step is refused.
     again = client.post(f"/threads/{t['id']}/steps/{nxt['id']}/complete")
     assert again.status_code == 400
@@ -374,16 +356,17 @@ def test_complete_endpoint_flips_and_completes_task(client, google, monkeypatch)
 # ── Reconcile ─────────────────────────────────────────────────────────────────
 
 
-def test_reconcile_completed_becomes_done(client, google):
+def test_reconcile_completed_becomes_done(client, tasks):
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
-    task = google.task(FOLLOW, nxt["task_id"])
-    task.update(
+    _set(
+        tasks,
+        nxt["task_id"],
         status="completed",
         title="Sent reminder #2",
         notes="no reply yet",
         # 20:00 UTC on the 30th is the 1st in IST.
-        completed="2026-09-30T20:00:00.000Z",
+        completed_at=_utc(2026, 9, 30, 20, 0),
     )
     step = _one(client, t["id"])["steps"][-1]
     assert step["kind"] == "done"
@@ -396,39 +379,53 @@ def test_reconcile_completed_becomes_done(client, google):
     assert step["task_id"] == nxt["task_id"]  # link retained on the done step
 
 
+def test_reconcile_completed_via_tasks_endpoint(client, tasks):
+    """Completing through the Tasks panel (`PATCH /tasks/...`) flips the step on the
+    next reconcile."""
+    t = _thread(client)
+    nxt = _next(client, t["id"], lst="mine").json()["steps"][-1]
+    r = client.patch(f"/tasks/{MINE}/{nxt['task_id']}", json={"status": "completed"})
+    assert r.status_code == 200, r.text
+    step = _one(client, t["id"])["steps"][-1]
+    assert step["kind"] == "done" and step["via"] == "mine"
+    # Undo from the panel reopens it.
+    r = client.patch(f"/tasks/{MINE}/{nxt['task_id']}", json={"status": "needsAction"})
+    assert r.status_code == 200, r.text
+    step = _one(client, t["id"])["steps"][-1]
+    assert step["kind"] == "next" and step["list"] == "mine"
+
+
 def test_reconcile_completed_without_timestamp_falls_back_to_today(
-    client, google, monkeypatch
+    client, tasks, monkeypatch
 ):
     monkeypatch.setattr(threads_svc, "today_ist", lambda: date(2026, 9, 29))
     t = _thread(client)
     nxt = _next(client, t["id"], lst="mine").json()["steps"][-1]
-    google.task(MINE, nxt["task_id"])["status"] = "completed"
+    _complete(tasks, nxt["task_id"], None)
     step = _one(client, t["id"])["steps"][-1]
     assert step["occurred_on"] == "2026-09-29" and step["via"] == "mine"
 
 
-def test_reconcile_uncompleted_last_step_is_next_again(client, google):
+def test_reconcile_uncompleted_last_step_is_next_again(client, tasks):
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
-    task = google.task(FOLLOW, nxt["task_id"])
-    task.update(status="completed", completed="2026-09-29T05:00:00.000Z")
+    _complete(tasks, nxt["task_id"], _utc(2026, 9, 29, 5, 0))
     assert _one(client, t["id"])["steps"][-1]["kind"] == "done"
-    task.update(status="needsAction", completed=None)
+    _reopen(tasks, nxt["task_id"])
     step = _one(client, t["id"])["steps"][-1]
     assert step["kind"] == "next" and step["occurred_on"] is None
     assert step["list"] == "follow" and step["due"] == "2026-10-01"
 
 
-def test_reconcile_uncompleted_not_last_rejoins_open_block(client, google):
+def test_reconcile_uncompleted_not_last_rejoins_open_block(client, tasks):
     """Goal 14a: a reopened task is open again even with later history, and moves
     after every done step."""
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
-    task = google.task(FOLLOW, nxt["task_id"])
-    task.update(status="completed")
+    _complete(tasks, nxt["task_id"], _utc(2026, 9, 29, 5, 0))
     _get(client)
     _log(client, t["id"], "Later update")
-    task.update(status="needsAction")
+    _reopen(tasks, nxt["task_id"])
     steps = _one(client, t["id"])["steps"]
     assert [(s["kind"], s["label"]) for s in steps] == [
         ("done", "Later update"),
@@ -436,13 +433,13 @@ def test_reconcile_uncompleted_not_last_rejoins_open_block(client, google):
     ]
 
 
-def test_reconcile_uncompleted_with_other_open_is_open_too(client, google):
+def test_reconcile_uncompleted_with_other_open_is_open_too(client, tasks):
     t = _thread(client)
     first = _next(client, t["id"]).json()["steps"][-1]
-    google.task(FOLLOW, first["task_id"]).update(status="completed")
+    _complete(tasks, first["task_id"], _utc(2026, 9, 29, 5, 0))
     _get(client)
     _next(client, t["id"], label="New next", lst="mine", due="2026-10-09")
-    google.task(FOLLOW, first["task_id"]).update(status="needsAction")
+    _reopen(tasks, first["task_id"])
     steps = _one(client, t["id"])["steps"]
     assert [(s["kind"], s["label"]) for s in steps] == [
         ("next", "Nudge them"),  # due 2026-10-01, sorts first in the open block
@@ -450,7 +447,7 @@ def test_reconcile_uncompleted_with_other_open_is_open_too(client, google):
     ]
 
 
-def _three_open(client, google):
+def _three_open(client):
     t = _thread(client, "NGO visit")
     _log(client, t["id"], "Shortlisted three")
     for label, lst, due in (
@@ -463,14 +460,9 @@ def _three_open(client, google):
     return t, {s["label"]: s for s in steps if s["kind"] == "next"}
 
 
-def _complete_in_google(google, step, when):
-    lst = MINE if step["list"] == "mine" else FOLLOW
-    google.task(lst, step["task_id"]).update(status="completed", completed=when)
-
-
-def test_reconcile_one_of_three_completed_joins_history(client, google):
-    t, opened = _three_open(client, google)
-    _complete_in_google(google, opened["Email NGO 3"], "2026-10-02T05:00:00.000Z")
+def test_reconcile_one_of_three_completed_joins_history(client, tasks):
+    t, opened = _three_open(client)
+    _complete(tasks, opened["Email NGO 3"]["task_id"], _utc(2026, 10, 2, 5, 0))
     steps = _one(client, t["id"])["steps"]
     assert [(s["kind"], s["label"]) for s in steps] == [
         ("done", "Shortlisted three"),
@@ -481,9 +473,9 @@ def test_reconcile_one_of_three_completed_joins_history(client, google):
     assert steps[1]["via"] == "follow"
 
 
-def test_reconcile_deleting_one_of_three_keeps_siblings(client, google):
-    t, opened = _three_open(client, google)
-    del google.lists[MINE]["tasks"][opened["Visit NGO 1"]["task_id"]]
+def test_reconcile_deleting_one_of_three_keeps_siblings(client, tasks):
+    t, opened = _three_open(client)
+    _delete(tasks, opened["Visit NGO 1"]["task_id"])
     steps = _one(client, t["id"])["steps"]
     assert [s["label"] for s in steps if s["kind"] == "next"] == [
         "Email NGO 3",
@@ -491,13 +483,13 @@ def test_reconcile_deleting_one_of_three_keeps_siblings(client, google):
     ]
 
 
-def test_reconcile_all_completed_dangles_in_completion_order(client, google):
-    t, opened = _three_open(client, google)
+def test_reconcile_all_completed_dangles_in_completion_order(client, tasks):
+    t, opened = _three_open(client)
     # One completes and reconciles; the other two complete before the next poll.
-    _complete_in_google(google, opened["Visit NGO 2"], "2026-10-02T05:00:00.000Z")
+    _complete(tasks, opened["Visit NGO 2"]["task_id"], _utc(2026, 10, 2, 5, 0))
     _get(client)
-    _complete_in_google(google, opened["Visit NGO 1"], "2026-10-04T05:00:00.000Z")
-    _complete_in_google(google, opened["Email NGO 3"], "2026-10-03T05:00:00.000Z")
+    _complete(tasks, opened["Visit NGO 1"]["task_id"], _utc(2026, 10, 4, 5, 0))
+    _complete(tasks, opened["Email NGO 3"]["task_id"], _utc(2026, 10, 3, 5, 0))
     steps = _one(client, t["id"])["steps"]
     assert all(s["kind"] == "done" for s in steps)  # dangling now
     assert [s["label"] for s in steps] == [
@@ -507,15 +499,14 @@ def test_reconcile_all_completed_dangles_in_completion_order(client, google):
         "Visit NGO 1",
     ]
     # Reopening the middle one returns it to the (now one-step) open block.
-    lst = google.task(FOLLOW, opened["Email NGO 3"]["task_id"])
-    lst.update(status="needsAction", completed=None)
+    _reopen(tasks, opened["Email NGO 3"]["task_id"])
     steps = _one(client, t["id"])["steps"]
     assert [(s["kind"], s["label"]) for s in steps][-1] == ("next", "Email NGO 3")
 
 
-def test_complete_endpoint_on_one_of_three(client, google, monkeypatch):
+def test_complete_endpoint_on_one_of_three(client, tasks, monkeypatch):
     monkeypatch.setattr(threads_svc, "today_ist", lambda: date(2026, 10, 2))
-    t, opened = _three_open(client, google)
+    t, opened = _three_open(client)
     sid = opened["Visit NGO 2"]["id"]
     r = client.post(f"/threads/{t['id']}/steps/{sid}/complete")
     assert r.status_code == 200, r.text
@@ -534,8 +525,8 @@ def test_complete_endpoint_on_one_of_three(client, google, monkeypatch):
     ]
 
 
-def test_delete_one_of_three_unlinks_only_it(client, google):
-    t, opened = _three_open(client, google)
+def test_delete_one_of_three_unlinks_only_it(client, tasks, writes):
+    t, opened = _three_open(client)
     victim = opened["Email NGO 3"]
     r = client.delete(f"/threads/{t['id']}/steps/{victim['id']}")
     assert r.status_code == 200, r.text
@@ -544,15 +535,13 @@ def test_delete_one_of_three_unlinks_only_it(client, google):
         "Visit NGO 1",
         "Visit NGO 2",
     ]
-    assert google.task(FOLLOW, victim["task_id"]) is not None
-    assert "delete_task" not in google.names()
+    assert tasks.get(victim["task_id"]) is not None
+    assert "delete" not in _names(writes)
 
 
 def test_one_task_linked_once_across_threads(session, user_a):
     """The per-user one-link-per-task index still holds."""
     from sqlalchemy.exc import IntegrityError
-
-    from app.threads.models import Thread
 
     a = Thread(user_id=user_a.id, title="A")
     b = Thread(user_id=user_a.id, title="B")
@@ -575,20 +564,25 @@ def test_one_task_linked_once_across_threads(session, user_a):
     session.rollback()
 
 
-def test_reconcile_deleted_removes_next(client, google):
+def test_reconcile_deleted_removes_next(client, tasks):
     t = _thread(client)
     _log(client, t["id"], "History")
     nxt = _next(client, t["id"]).json()["steps"][-1]
-    del google.lists[FOLLOW]["tasks"][nxt["task_id"]]
+    r = client.delete(f"/tasks/{FOLLOW}/{nxt['task_id']}")
+    assert r.status_code == 200, r.text
     steps = _one(client, t["id"])["steps"]
     assert [s["kind"] for s in steps] == ["done"]  # dangling now
 
 
-def test_reconcile_open_refreshes_cache(client, google):
+def test_reconcile_open_refreshes_cache(client, tasks):
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
-    google.task(FOLLOW, nxt["task_id"]).update(
-        title="Edited on phone", notes="phone note", due="2026-10-12T00:00:00.000Z"
+    _set(
+        tasks,
+        nxt["task_id"],
+        title="Edited on phone",
+        notes="phone note",
+        due=date(2026, 10, 12),
     )
     step = _one(client, t["id"])["steps"][-1]
     assert (step["kind"], step["label"], step["note"], step["due"]) == (
@@ -599,44 +593,81 @@ def test_reconcile_open_refreshes_cache(client, google):
     )
 
 
-def test_dashboard_move_repoints_link(client, google):
+def test_dashboard_move_keeps_link(client, tasks):
+    """Goal 17: a cross-list move via the tasks endpoint keeps the task id, so the
+    thread badge link survives with no repoint; reconcile picks up the new list."""
     t = _thread(client)
     nxt = _next(client, t["id"]).json()["steps"][-1]
     r = client.post(
         f"/tasks/{FOLLOW}/{nxt['task_id']}/move", json={"target_list_id": MINE}
     )
     assert r.status_code == 200, r.text
-    new_id = r.json()["new_task_id"]
+    assert r.json()["new_task_id"] == nxt["task_id"]
     step = _one(client, t["id"])["steps"][-1]
     assert step["kind"] == "next"
-    assert (step["tasklist_id"], step["task_id"], step["list"]) == (
-        MINE,
-        new_id,
-        "mine",
-    )
+    assert step["id"] == nxt["id"] and step["task_id"] == nxt["task_id"]
+    assert (step["tasklist_id"], step["list"]) == (MINE, "mine")
 
 
-def test_reconcile_skips_google_when_nothing_linked(client, google):
+def test_reconcile_skips_store_when_nothing_linked(client, tasks, monkeypatch):
     t = _thread(client)
     _log(client, t["id"], "Local only")
-    google.calls.clear()
-    _get(client)
-    assert "get_task_lists" not in google.names()
+
+    def boom(*args, **kwargs):
+        raise AssertionError("store read with no linked step")
+
+    monkeypatch.setattr("app.tasks_store.service.get_task_lists", boom)
+    assert [s["label"] for s in _one(client, t["id"])["steps"]] == ["Local only"]
 
 
-def test_reconcile_google_failure_serves_cache(client, google, monkeypatch):
-    t = _thread(client)
-    _next(client, t["id"])
+def test_not_yet_imported_serves_cached_steps(auth, session, user_a):
+    """Before the one-time import the store is empty: reconcile is skipped and the
+    cached steps are served, none removed."""
+    user_a.tasks_imported_at = None
+    session.add(user_a)
+    session.commit()
+    thread = Thread(user_id=user_a.id, title="Pre-import")
+    session.add(thread)
+    session.commit()
+    session.add_all(
+        [
+            ThreadStep(
+                thread_id=thread.id,
+                user_id=user_a.id,
+                position=1000.0,
+                kind="done",
+                label="History",
+                occurred_on=date(2026, 9, 1),
+                tasklist_id=FOLLOW,
+                task_id="G_DONE",
+                via="follow",
+            ),
+            ThreadStep(
+                thread_id=thread.id,
+                user_id=user_a.id,
+                position=2000.0,
+                kind="next",
+                label="Cached next",
+                tasklist_id=MINE,
+                task_id="G_OPEN",
+                via="mine",
+                due=date(2026, 10, 1),
+            ),
+        ]
+    )
+    session.commit()
 
-    async def boom(creds):
-        raise RuntimeError("down")
+    client = auth.as_user(user_a)
+    for _ in range(2):  # twice: the first GET must not have deleted anything
+        steps = _one(client, thread.id)["steps"]
+        assert [(s["kind"], s["label"], s["task_id"]) for s in steps] == [
+            ("done", "History", "G_DONE"),
+            ("next", "Cached next", "G_OPEN"),
+        ]
+    assert len(session.exec(select(ThreadStep)).all()) == 2
 
-    monkeypatch.setattr("app.google.tasks.get_task_lists", boom)
-    steps = _one(client, t["id"])["steps"]
-    assert [s["kind"] for s in steps] == ["next"]
 
-
-def test_list_orders_steps_and_includes_archived(client, google):
+def test_list_orders_steps_and_includes_archived(client, tasks):
     a = _thread(client, "A")
     b = _thread(client, "B")
     client.patch(f"/threads/{b['id']}", json={"archived": True})
@@ -648,7 +679,7 @@ def test_list_orders_steps_and_includes_archived(client, google):
 # ── Isolation ─────────────────────────────────────────────────────────────────
 
 
-def test_two_user_isolation_on_every_endpoint(auth, user_a, user_b, google):
+def test_two_user_isolation_on_every_endpoint(auth, user_a, user_b, tasks):
     ca = auth.as_user(user_a)
     t = _thread(ca)
     done = _log(ca, t["id"], "A's history")["steps"][0]
@@ -678,29 +709,46 @@ def test_two_user_isolation_on_every_endpoint(auth, user_a, user_b, google):
     mine = _one(ca, tid)
     assert mine["title"] == "Partner pilot" and mine["archived"] is False
     assert [s["label"] for s in mine["steps"]] == ["A's history", "Nudge them"]
-    assert google.task(FOLLOW, nxt["task_id"]).get("notes") in (None, "")
+    task = tasks.get(nxt["task_id"])
+    assert task.notes in (None, "") and task.status == "needsAction"
 
 
-def test_repoint_link_is_user_scoped(session, user_a, user_b):
-    from app.threads.models import Thread
+def test_reconcile_and_next_are_user_scoped(auth, user_a, user_b, tasks):
+    """B's next step goes into B's own pinned list, and B's reconcile never reads
+    A's tasks: a B step pointing at A's task id is treated as deleted."""
+    tasks.lists(user_b)
+    ca = auth.as_user(user_a)
+    ta = _thread(ca)
+    a_next = _next(ca, ta["id"]).json()["steps"][-1]
 
-    ta = Thread(user_id=user_a.id, title="a")
-    session.add(ta)
-    session.commit()
-    session.add(
+    cb = auth.as_user(user_b)
+    tb = _thread(cb, "B's")
+    r = _next(cb, tb["id"], lst="mine")
+    assert r.status_code == 201, r.text
+    b_next = r.json()["steps"][-1]
+    assert b_next["tasklist_id"] == f"{MINE}_{user_b.id}"
+    assert tasks.tasks(user_a, MINE) == []
+
+    # A B step forged to link A's task: reconcile scopes by user, so it's "gone".
+    tasks.session.add(
         ThreadStep(
-            thread_id=ta.id,
-            user_id=user_a.id,
-            position=1000,
+            thread_id=tb["id"],
+            user_id=user_b.id,
+            position=5000.0,
             kind="next",
-            label="x",
+            label="Forged",
             tasklist_id=FOLLOW,
-            task_id="T1",
+            task_id=a_next["task_id"],
+            via="follow",
         )
     )
-    session.commit()
-    assert threads_svc.repoint_link(session, user_b.id, FOLLOW, "T1", MINE, "T9") == 0
-    assert threads_svc.repoint_link(session, user_a.id, FOLLOW, "T1", MINE, "T9") == 1
+    tasks.session.commit()
+    steps = _one(cb, tb["id"])["steps"]
+    assert [s["label"] for s in steps] == ["Nudge them"]
+    assert steps[0]["task_id"] == b_next["task_id"]
+    # A's own link is untouched.
+    ca = auth.as_user(user_a)
+    assert _one(ca, ta["id"])["steps"][-1]["task_id"] == a_next["task_id"]
 
 
 # ── Write surface (writes.md) ─────────────────────────────────────────────────
@@ -718,10 +766,41 @@ def _attr_calls(mod, owner: str) -> set[str]:
     }
 
 
+def _attr_refs(mod, owner: str) -> set[str]:
+    """Every `owner.<attr>` reference (called or not)."""
+    tree = ast.parse(inspect.getsource(mod))
+    return {
+        n.attr
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name)
+        and n.value.id == owner
+    }
+
+
+def _imported_modules(mod) -> set[str]:
+    tree = ast.parse(inspect.getsource(mod))
+    names: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            names.update(a.name for a in n.names)
+        elif isinstance(n, ast.ImportFrom) and n.module:
+            names.add(n.module)
+            names.update(f"{n.module}.{a.name}" for a in n.names)
+    return names
+
+
 def test_threads_write_dependency_set_is_pinned():
     """Statically: threads calls exactly {create_task, update_content, reschedule,
-    move} on the writes service — never `delete`/`delete_task`/`append_note`."""
+    move} on the writes service — never `delete`/`delete_task`/`append_note`.
+    (`writes_svc._UNSET`, the "keep the due" sentinel, is the only other ref.)"""
     assert _attr_calls(threads_svc, "writes_svc") == {
+        "create_task",
+        "update_content",
+        "reschedule",
+        "move",
+    }
+    assert _attr_refs(threads_svc, "writes_svc") - {"_UNSET"} == {
         "create_task",
         "update_content",
         "reschedule",
@@ -729,14 +808,13 @@ def test_threads_write_dependency_set_is_pinned():
     }
 
 
-def test_threads_never_reaches_delete_task():
-    """Threads reads Google directly only (list fetches); no thin write wrapper is
-    called from the threads package, and `delete_task` isn't even referenced."""
-    assert _attr_calls(threads_svc, "tasks_client") == {
-        "get_task_lists",
-        "get_tasklist_refs",
-    }
+def test_threads_never_reaches_google_tasks_or_delete():
+    """Goal 17: the threads package never imports the Google Tasks client (reads go
+    to the local store), and `delete_task` isn't even referenced."""
     for mod in (threads_svc, threads_router):
+        imported = _imported_modules(mod)
+        assert not any(m.startswith("app.google.tasks") for m in imported), imported
+        assert _attr_refs(mod, "tasks_client") == set()
         src = inspect.getsource(mod)
-        assert "delete_task" not in src.replace("never calls `delete_task`", "")
+        assert "delete_task" not in src
         assert "writes_svc.delete(" not in src

@@ -94,8 +94,8 @@ export function MobileTaskList({
   if (!list)
     return (
       <p className="panel-status panel-error">
-        list &lsquo;{title}&rsquo; not found — rename a Google list to match, or
-        edit PINNED_LIST_TITLES.
+        list &lsquo;{title}&rsquo; not found — rename a list to match, or edit
+        PINNED_LIST_TITLES.
       </p>
     );
 

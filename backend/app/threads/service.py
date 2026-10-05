@@ -1,10 +1,10 @@
-"""Threads service (goal 14): storage, reconcile (Google → threads), and link writes.
+"""Threads service (goal 14): storage, reconcile (tasks → threads), and link writes.
 
-A thread's next ("open") steps — any number since goal 14a — are real Google Tasks
-in the two pinned lists; Google is the source of truth for their title / notes /
-due. Ranks keep every done step before every open step (the open block); the API
-serves done steps by rank, then open steps by due. `list_threads` reconciles every
-linked step against a fresh fetch before responding:
+A thread's next ("open") steps — any number since goal 14a — are real tasks in the
+two pinned lists; the task store (goal 17: the app's own DB) is the source of truth
+for their title / notes / due. Ranks keep every done step before every open step
+(the open block); the API serves done steps by rank, then open steps by due.
+`list_threads` reconciles every linked step against the store before responding:
 
   - linked task completed          → that step becomes done (dated by completion) and
                                      joins the end of the done history
@@ -13,30 +13,27 @@ linked step against a fresh fetch before responding:
   - linked task gone               → that step is removed (dangles if it was the last)
   - linked task still open         → refresh the cached label / note / due / list
 
-Google writes go through `app.writes.service` ONLY, and only these four:
+Task writes go through `app.writes.service` ONLY, and only these four:
 `create_task`, `update_content`, `reschedule`, `move` (AST-pinned in the tests).
-Threads **never** deletes a Google task — unlinking a next step or archiving a
-thread leaves the task in its list. Google write first, DB write second, same
-request: an orphan task in a list is the accepted failure mode (see writes.md).
+Threads **never** deletes a task — unlinking a next step or archiving a thread
+leaves the task in its list.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from sqlmodel import Session, select
 
+from app.auth.models import User
 from app.errors import ApiError
-from app.google import tasks as tasks_client
 from app.google.calendar import today_ist
 from app.overlay.service import _IST
+from app.tasks_store import service as store
 from app.threads.models import Thread, ThreadStep
 from app.writes import service as writes_svc
-
-if TYPE_CHECKING:
-    from google.oauth2.credentials import Credentials
 
 _log = logging.getLogger("threads.service")
 
@@ -78,21 +75,15 @@ def _list_key(tasklist_id: str | None, pinned: dict[str, str]) -> str | None:
     return None
 
 
-async def _resolve_list_id(creds: "Credentials", key: str) -> str:
+def _resolve_list_id(session: Session, user_id: int, key: str) -> str:
     if key not in LIST_TITLES:
         raise ApiError(400, "bad_list", "list must be 'mine' or 'follow'.")
-    try:
-        refs = await tasks_client.get_tasklist_refs(creds)
-    except Exception as exc:
-        raise ApiError(
-            502, "google_tasks_unavailable", "Could not fetch Google Tasks lists."
-        ) from exc
-    list_id = _pinned_ids(refs).get(key)
+    list_id = _pinned_ids(store.get_tasklist_refs(session, user_id)).get(key)
     if list_id is None:
         raise ApiError(
             422,
             "pinned_list_missing",
-            f"No Google task list named '{LIST_TITLES[key]}'.",
+            f"No task list named '{LIST_TITLES[key]}'.",
         )
     return list_id
 
@@ -189,11 +180,11 @@ def thread_payload(session: Session, user_id: int, thread: Thread) -> dict:
     return serialize_thread(thread, _steps(session, user_id, thread.id))
 
 
-# ── Reconcile (Google → threads) ─────────────────────────────────────────────
+# ── Reconcile (task store → threads) ─────────────────────────────────────────────
 
 
 def _refresh_cache(step: ThreadStep, task: dict, list_id: str, key: str | None) -> bool:
-    """Copy Google's title / notes / due / list onto a live next step."""
+    """Copy the task's title / notes / due / list onto a live next step."""
     fresh = {
         "label": task.get("title") or step.label,
         "note": task.get("notes") or "",
@@ -227,7 +218,7 @@ def _flip_done(
 def reconcile(
     session: Session, user_id: int, steps: list[ThreadStep], raw_lists: list[dict]
 ) -> list[ThreadStep]:
-    """Apply Google's state to every linked step (see module docstring). Returns the
+    """Apply the task store's state to every linked step (see module docstring). Returns the
     surviving steps in position order; commits once if anything changed."""
     pinned = _pinned_ids(raw_lists)
     index: dict[str, tuple[str, dict]] = {}
@@ -242,7 +233,7 @@ def reconcile(
         if step.kind == "next" and step.task_id:
             hit = index.get(step.task_id)
             if hit is None:
-                # Deleted in Google (or moved outside the dashboard — a v0 limit).
+                # The task was deleted (or never imported — goal 17).
                 session.delete(step)
                 changed = True
                 continue
@@ -291,14 +282,11 @@ def reconcile(
     return survivors
 
 
-async def list_threads(
-    session: Session, creds: "Credentials", user_id: int
-) -> list[dict]:
-    """All of the user's threads (active + archived), reconciled against Google.
-
-    A failed Google fetch degrades to the cached step state (logged) rather than
-    failing the panel — the next poll reconciles.
-    """
+async def list_threads(session: Session, user_id: int) -> list[dict]:
+    """All of the user's threads (active + archived), reconciled against the task
+    store. Before the user's one-time task import (goal 17) the store is empty, so
+    reconcile is skipped (it would read every linked task as deleted) and the cached
+    step state is served."""
     threads = session.exec(
         select(Thread).where(Thread.user_id == user_id).order_by(Thread.id)
     ).all()
@@ -309,15 +297,12 @@ async def list_threads(
             .order_by(ThreadStep.position)
         ).all()
     )
-    if any(s.task_id for s in steps):
-        try:
-            raw_lists = await tasks_client.get_task_lists(creds)
-        except Exception:
-            _log.exception(
-                "threads reconcile: Google Tasks fetch failed; serving cache"
-            )
-        else:
-            steps = reconcile(session, user_id, steps, raw_lists)
+    user = session.get(User, user_id)
+    imported = user is not None and user.tasks_imported_at is not None
+    if imported and any(s.task_id for s in steps):
+        steps = reconcile(
+            session, user_id, steps, store.get_task_lists(session, user_id)
+        )
 
     by_thread: dict[int, list[ThreadStep]] = {}
     for step in steps:
@@ -350,7 +335,7 @@ def update_thread(
     title: Any = _UNSET,
     archived: Any = _UNSET,
 ) -> dict:
-    """Rename / archive / restore. Archiving never touches the linked Google task."""
+    """Rename / archive / restore. Archiving never touches the linked task."""
     thread = _get_thread(session, user_id, thread_id)
     if title is not _UNSET and title is not None:
         thread.title = _clean(title, "title")
@@ -410,7 +395,6 @@ def add_step(
 
 async def set_next(
     session: Session,
-    creds: "Credentials",
     user_id: int,
     thread_id: int,
     label: str,
@@ -418,20 +402,19 @@ async def set_next(
     due: date | None,
     note: str | None = None,
 ) -> dict:
-    """Create the Google task in the pinned list, THEN append a linked open step to
-    the open block (a thread may hold any number since goal 14a).
+    """Create the task in the pinned list, THEN append a linked open step to the
+    open block (a thread may hold any number since goal 14a).
 
-    A `create_task` failure writes no row; a DB failure after a successful create
-    is logged (orphan task, accepted).
+    A `create_task` failure writes no row; a failure linking after a successful
+    create is logged (orphan task, accepted).
     """
     thread = _get_thread(session, user_id, thread_id)
     steps = _steps(session, user_id, thread_id)
     title = _clean(label, "label")
-    list_id = await _resolve_list_id(creds, list_key)
+    list_id = _resolve_list_id(session, user_id, list_key)
 
     created = await writes_svc.create_task(
         session,
-        creds,
         user_id,
         tasklist_id=list_id,
         title=title,
@@ -459,22 +442,20 @@ async def set_next(
     except Exception as exc:
         session.rollback()
         _log.exception(
-            "threads: created Google task %s but could not link it to thread %s",
+            "threads: created task %s but could not link it to thread %s",
             created.get("id"),
             thread_id,
         )
         raise ApiError(
             500,
             "thread_link_failed",
-            "The task was created in Google Tasks but could not be linked to the "
-            "thread.",
+            "The task was created but could not be linked to the thread.",
         ) from exc
     return thread_payload(session, user_id, thread)
 
 
 async def update_step(
     session: Session,
-    creds: "Credentials",
     user_id: int,
     thread_id: int,
     step_id: int,
@@ -485,9 +466,9 @@ async def update_step(
     list_key: Any = _UNSET,
 ) -> dict:
     """Done step: a local edit. Next step: label/note → `update_content`, due →
-    `reschedule`, list → `move` (which also carries a due change on its insert leg
-    and repoints the link). Unchanged fields are skipped; each successful Google
-    write is committed before the next, so a later failure leaves the cache true."""
+    `reschedule`, list → `move` (which also carries a due change). Unchanged fields
+    are skipped; each successful write is committed before the next, so a later
+    failure leaves the cache true."""
     thread = _get_thread(session, user_id, thread_id)
     step = _get_step(session, user_id, thread_id, step_id)
 
@@ -517,7 +498,6 @@ async def update_step(
     if content:
         updated = await writes_svc.update_content(
             session,
-            creds,
             user_id,
             tasklist_id=step.tasklist_id,
             task_id=step.task_id,
@@ -529,22 +509,20 @@ async def update_step(
         session.commit()
 
     if list_changed:
-        target_id = await _resolve_list_id(creds, list_key)
-        old_list, old_id = step.tasklist_id, step.task_id
-        res = await writes_svc.move(
+        target_id = _resolve_list_id(session, user_id, list_key)
+        await writes_svc.move(
             session,
-            creds,
             user_id,
-            tasklist_id=old_list,
-            task_id=old_id,
+            tasklist_id=step.tasklist_id,
+            task_id=step.task_id,
             target_list_id=target_id,
             rank=None,
             due_date=(due.isoformat() if due else None)
             if due_changed
             else writes_svc._UNSET,
         )
-        repoint_link(session, user_id, old_list, old_id, target_id, res["new_task_id"])
         session.refresh(step)
+        step.tasklist_id = target_id  # a move keeps the task id (goal 17)
         step.via = list_key
         if due_changed:
             step.due = due
@@ -553,7 +531,6 @@ async def update_step(
     elif due_changed:
         await writes_svc.reschedule(
             session,
-            creds,
             user_id,
             tasklist_id=step.tasklist_id,
             task_id=step.task_id,
@@ -570,20 +547,18 @@ async def update_step(
 
 async def complete_step(
     session: Session,
-    creds: "Credentials",
     user_id: int,
     thread_id: int,
     step_id: int,
 ) -> dict:
-    """Mark an open step done: complete its Google task, then flip the step (its
-    siblings stay open)."""
+    """Mark an open step done: complete its task, then flip the step (its siblings
+    stay open)."""
     thread = _get_thread(session, user_id, thread_id)
     step = _get_step(session, user_id, thread_id, step_id)
     if step.kind != "next":
         raise ApiError(400, "not_next", "Only an open step can be marked done.")
     updated = await writes_svc.update_content(
         session,
-        creds,
         user_id,
         tasklist_id=step.tasklist_id,
         task_id=step.task_id,
@@ -597,8 +572,8 @@ async def complete_step(
 
 
 def delete_step(session: Session, user_id: int, thread_id: int, step_id: int) -> dict:
-    """Done step: delete it. Next step: UNLINK only — the row goes, the Google task
-    stays in its list (threads never deletes a Google task)."""
+    """Done step: delete it. Next step: UNLINK only — the row goes, the task stays
+    in its list (threads never deletes a task)."""
     thread = _get_thread(session, user_id, thread_id)
     step = _get_step(session, user_id, thread_id, step_id)
     unlinked = step.kind == "next"
@@ -606,31 +581,3 @@ def delete_step(session: Session, user_id: int, thread_id: int, step_id: int) ->
     _touch(session, thread_id)
     session.commit()
     return {**thread_payload(session, user_id, thread), "unlinked": unlinked}
-
-
-def repoint_link(
-    session: Session,
-    user_id: int,
-    old_list: str,
-    old_id: str,
-    new_list: str,
-    new_id: str,
-) -> int:
-    """A dashboard move re-mints the task id (insert-then-delete), so follow it: any
-    step linked to the old id now points at the new one. Called by the tasks `move`
-    endpoint and by `update_step`'s list switch. Returns the number of rows moved.
-    The next reconcile refreshes the step's `via` from the new list."""
-    rows = session.exec(
-        select(ThreadStep).where(
-            ThreadStep.user_id == user_id,
-            ThreadStep.tasklist_id == old_list,
-            ThreadStep.task_id == old_id,
-        )
-    ).all()
-    for row in rows:
-        row.tasklist_id = new_list
-        row.task_id = new_id
-        row.updated_at = _now()
-    if rows:
-        session.commit()
-    return len(rows)

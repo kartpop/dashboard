@@ -4,14 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-A personal dashboard that surfaces Google Tasks, Calendar, and Drive alongside a small
-task-metadata overlay.
+A personal dashboard for tasks (stored in the app's own DB since goal 17; Google Tasks is
+read once, by the one-time importer), Google Calendar, and Google Drive notes.
 
 ## Stack
 
 - Backend: FastAPI (Python)
 - Frontend: React
-- Storage: SQLite locally, Postgres in production, for the task-metadata overlay only
+- Storage: SQLite, locally and in production (one EC2 host, a Docker volume), for tasks and
+  all other app state
 
 ## Repo map
 
@@ -44,5 +45,5 @@ acceptance criteria for the active milestone — do not work outside that scope.
 
 - Never commit OAuth tokens, `CLAUDE.local.md`, or `.claude/settings.local.json`.
 - This is a public repo. When the owner gives examples in chat that name people, organizations, partners, or projects, never carry those names into goal docs, code, tests, fixtures, sample data, or any other committed file. Always use generic examples (e.g. "a partner NGO", "teammate A").
-- Dashboard read paths call the Google API client directly. Do not use MCP or an LLM to read tasks, calendar, or drive.
+- Dashboard read paths call the Google API client directly. Do not use MCP or an LLM to read calendar or drive (or, in the one-time task importer, Google Tasks).
 - Google Drive/Docs OAuth scope is `drive.file` only — never `documents` or `drive`. Doc/folder IDs come from config, never from LLM output. (ADR: `docs/goals/architecture/drive-access-scoping.md`.)

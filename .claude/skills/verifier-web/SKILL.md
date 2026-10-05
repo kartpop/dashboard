@@ -14,6 +14,11 @@ Both must be running before you drive either surface.
   `cd backend && uv run python -m app.google.auth` once interactively (opens a browser).
 - Overlay DB migrated: `cd backend && uv run alembic upgrade head` (safe to re-run; no-ops if
   already at head).
+- **Tasks come from the local DB (goal 17)**, not Google Tasks — there are no Google task lists to
+  seed. A fresh local user is **imported once** from Google automatically (startup sweep, or inline
+  on the first `GET /tasks`); while that is pending `GET /tasks` answers `503
+  tasks_import_pending` and the panel shows "Importing your tasks…" (retries every 5s). After the
+  import the pinned lists "My Tasks" and "Follow-ups" always exist.
 - Node deps installed: `cd frontend && npm install` (skip if `node_modules/` exists and
   `package.json` hasn't changed).
 - Playwright ready (for the GUI surface): the `playwright` package is a backend **dev
@@ -94,11 +99,11 @@ curl -s 'http://localhost:8010/calendar/day?date=2026-07-08' | jq '.events | len
 curl -s 'http://localhost:8010/calendar/day?date=nope' | jq .
 ```
 
-### Write endpoints (goal 4 — Google writes)
+### Write endpoints (goal 4; local task store since goal 17)
 
-These mutate Google Tasks (due date + list membership). **Never fire them against a real list** —
-they go through the `verifier-writes` skill, which seeds and tears down `zz-verifier-test` lists.
-Load `verifier-writes` for the full recipe; the shapes:
+These mutate the **local** task store (due date + list membership) — no Google call. Still,
+the local DB holds the user's real tasks: exercise writes on throwaway tasks you create
+(e.g. titled `vt-…`) and delete them afterwards; don't edit existing tasks. The shapes:
 
 ```bash
 # Reschedule = due-date change (POST, not PATCH). due_date is "YYYY-MM-DD" (IST) or null (NO_DATE).
@@ -107,16 +112,16 @@ curl -s -X POST http://localhost:8010/tasks/<LISTID>/<TASKID>/reschedule \
   -d '{"due_date": "2026-06-15", "rank": 1000, "group_id": null}' | jq .
 # group_id must reference a group in the DESTINATION bucket, else 422 group_wrong_bucket.
 
-# Move to another list (insert-then-delete; overlay row migrates to the new task id).
+# Move to another list (in-place update; the task keeps its id — new_task_id == TASKID).
 curl -s -X POST http://localhost:8010/tasks/<LISTID>/<TASKID>/move \
   -H 'Content-Type: application/json' \
   -d '{"target_list_id": "<OTHERLISTID>"}' | jq .
 # Move to the current list → 400 same_list.
 ```
 
-### Content CRUD endpoints (goal 4a — Google content writes)
+### Content CRUD endpoints (goal 4a; local task store since goal 17)
 
-Also exercised only against `zz-verifier-test` lists (`verifier-writes`). Shapes:
+Same rule: throwaway `vt-…` tasks only, cleaned up afterwards. Shapes:
 
 ```bash
 # Create a task (lands undated → NO_DATE, top of bucket). 201, returns the new task.
@@ -136,9 +141,9 @@ curl -s -X PATCH http://localhost:8010/tasks/<LISTID>/<TASKID> \
 # Delete a task (immediate on the backend; the ~5s defer/undo is frontend-only).
 curl -s -X DELETE http://localhost:8010/tasks/<LISTID>/<TASKID> | jq .
 
-# Rename a list (tasklists resource).
+# Rename a list (rename it back afterwards).
 curl -s -X PATCH http://localhost:8010/lists/<LISTID> \
-  -H 'Content-Type: application/json' -d '{"title": "zz-verifier-test-renamed"}' | jq .
+  -H 'Content-Type: application/json' -d '{"title": "renamed-list"}' | jq .
 ```
 
 ## Frontend surface (GUI)
@@ -160,7 +165,7 @@ with sync_playwright() as p:
 Key selectors:
 - `.panel` — each surface panel (My Tasks, Follow-ups, Scratchpad). **Goal 7b:** the page is exactly
   those three; the below-fold Calendar panel and the "Other tasks" section were **removed**.
-- `.task-list-section` — one per Google task list
+- `.task-list-section` — one per task list
 - `.date-group` / `.date-group-label` — bucketed date groups (key = bucket key)
 - `.task-item` — individual task row (standalone or within group)
 - `.drag-handle` — drag affordance (⠿ braille block)
@@ -174,7 +179,7 @@ Key selectors:
   the group clip), so query it at the document root, NOT inside `.group-container`.
 - `.move-to-list-option` — each target-list option inside the popover
 - `.task-menu-delete` — the Delete action inside the ⋯ popover (goal 4a)
-- `.toast` — write-failure toast (`role="alert"`; appears only when a Google write fails and local
+- `.toast` — write-failure toast (`role="alert"`; appears only when a write fails and local
   state has rolled back)
 
 ### Goal-4a selectors (full CRUD / MVP)
@@ -275,13 +280,13 @@ Desktop regression for goal-15-style changes: screenshot Home and Dev at 1440×9
 verifier may serve generic fixture JSON with `page.route("http://localhost:8010/**", …)`
 (`route.fulfill` with `Access-Control-Allow-Origin: http://localhost:5173` +
 `Access-Control-Allow-Credentials: true`). Fixture data must be generic (no real names). Write
-checks against real Google still follow `verifier-writes`.
+checks against the real backend follow the throwaway-`vt-…`-task rule above.
 
 **Goal-4 DnD note:** there is now ONE `<DndContext>` per task list (it spans the list's buckets), so a
 task can be dragged *between* date buckets = reschedule (one `reschedule` POST + optimistic re-bucket).
-A within-bucket drag still fires only an overlay PATCH (no Google write). Write-path verification
-(reschedule/move, failure rollback, the `.toast`) is covered by the `verifier-writes` skill against
-`zz-verifier-test` lists only.
+A within-bucket drag still fires only an overlay PATCH. Write-path verification (reschedule/move,
+failure rollback, the `.toast`) uses throwaway `vt-…` tasks only (goal 17: all task writes are
+local).
 
 To observe PATCH/POST/DELETE requests fired by the frontend, attach a route listener:
 
@@ -293,10 +298,10 @@ page.goto("http://localhost:5173")
 
 ### Goal-4a UI-flow checks (behaviours endpoint checks can't see)
 
-Drive these with Playwright + a request listener (`mutations` above), against `zz-verifier-test`
-lists only. They assert *state-machine* properties, not just final state:
+Drive these with Playwright + a request listener (`mutations` above), on throwaway `vt-…` tasks
+only. They assert *state-machine* properties, not just final state:
 
-- **Complete + Undo fires ZERO Google writes on undo.** Check `.task-check` on a task → it leaves
+- **Complete + Undo fires no DELETE and no extra writes beyond the uncomplete.** Check `.task-check` on a task → it leaves
   the active view, exactly one `PATCH …/{task}` with `{status:"completed"}` fires, and a
   `.toast--action` appears. Click `.toast-undo` *within ~5s* → the task returns and exactly one
   more `PATCH` with `{status:"needsAction"}` fires (the undo). Completing a group's last member
@@ -429,7 +434,8 @@ UI-flow checks:
 ## Teardown
 
 Kill background processes after verification. The overlay DB (`backend/overlay.db`) is
-gitignored and safe to leave in place — it accumulates rank/group data from test interactions.
+gitignored and safe to leave in place — since goal 17 it also holds the user's tasks, so delete
+any `vt-…` tasks you created.
 
 ## Goal 8: auth-gated endpoints + isolation
 

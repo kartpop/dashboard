@@ -35,6 +35,31 @@ async function handle<T>(response: Response, path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+// Write tracking (goal 17). A background poll that raced a write can hand back the
+// pre-write state and briefly undo an optimistic change (a completed task popping
+// back). Polls go through `apiPollGet`, which drops its result if any write was in
+// flight when it started or ran while it was out.
+let writesInFlight = 0;
+let writeGen = 0;
+
+function tracked<T>(request: Promise<T>): Promise<T> {
+  writesInFlight += 1;
+  writeGen += 1;
+  return request.finally(() => {
+    writesInFlight -= 1;
+    writeGen += 1;
+  });
+}
+
+/** A GET for background polling: resolves to null when its answer may be stale. */
+export async function apiPollGet<T>(path: string): Promise<T | null> {
+  const startGen = writesInFlight > 0 ? null : writeGen;
+  const data = await apiGet<T>(path);
+  return startGen !== null && startGen === writeGen && writesInFlight === 0
+    ? data
+    : null;
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   return handle<T>(
     await fetch(`${API_BASE_URL}${path}`, { credentials: CREDENTIALS }),
@@ -42,48 +67,34 @@ export async function apiGet<T>(path: string): Promise<T> {
   );
 }
 
-export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
   return handle<T>(
     await fetch(`${API_BASE_URL}${path}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      method,
+      ...(body === undefined
+        ? {}
+        : {
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }),
       credentials: CREDENTIALS,
-      body: JSON.stringify(body),
     }),
     path,
   );
 }
 
-export async function apiPost<T>(path: string, body: unknown): Promise<T> {
-  return handle<T>(
-    await fetch(`${API_BASE_URL}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: CREDENTIALS,
-      body: JSON.stringify(body),
-    }),
-    path,
-  );
+export function apiPatch<T>(path: string, body: unknown): Promise<T> {
+  return tracked(send<T>("PATCH", path, body));
 }
 
-export async function apiPut<T>(path: string, body: unknown): Promise<T> {
-  return handle<T>(
-    await fetch(`${API_BASE_URL}${path}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      credentials: CREDENTIALS,
-      body: JSON.stringify(body),
-    }),
-    path,
-  );
+export function apiPost<T>(path: string, body: unknown): Promise<T> {
+  return tracked(send<T>("POST", path, body));
 }
 
-export async function apiDelete<T>(path: string): Promise<T> {
-  return handle<T>(
-    await fetch(`${API_BASE_URL}${path}`, {
-      method: "DELETE",
-      credentials: CREDENTIALS,
-    }),
-    path,
-  );
+export function apiPut<T>(path: string, body: unknown): Promise<T> {
+  return tracked(send<T>("PUT", path, body));
+}
+
+export function apiDelete<T>(path: string): Promise<T> {
+  return tracked(send<T>("DELETE", path));
 }

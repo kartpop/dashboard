@@ -811,7 +811,7 @@ function StepPopover({
         </label>
         <i>
           {isNext
-            ? "Same text as the Google Task’s description"
+            ? "Same text as the task’s notes"
             : "Context for future you"}
         </i>
       </div>

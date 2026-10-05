@@ -22,6 +22,7 @@ from app.news import scheduler as news_scheduler  # noqa: E402
 from app.router import scheduler as router_scheduler  # noqa: E402
 from app.routers import calendar, dev, news, scratch, tasks  # noqa: E402
 from app.settings.router import router as settings_router  # noqa: E402
+from app.tasks_store import scheduler as tasks_import_scheduler  # noqa: E402
 from app.threads.router import router as threads_router  # noqa: E402
 
 _log = logging.getLogger(__name__)
@@ -59,9 +60,11 @@ async def lifespan(_app: FastAPI):
     router_scheduler.start()
     news_scheduler.start()
     dev_scheduler.start()
+    tasks_import_scheduler.start()
     try:
         yield
     finally:
+        await tasks_import_scheduler.stop()
         await dev_scheduler.stop()
         await news_scheduler.stop()
         await router_scheduler.stop()

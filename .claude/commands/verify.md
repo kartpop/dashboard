@@ -18,9 +18,10 @@ must stay out of the main context; this is the goal-3 lesson the `/verify` comma
    the WHO (role, tool allowlist, PASS/FAIL output shape); it preloads the `verifier-web` skill (launch
    recipe, endpoints, selectors). In the invocation prompt:
    - Paste the acceptance-criteria checklist verbatim as the checks to run.
-   - For any goal that writes to Google (goal 4+), instruct it to ALSO load the **`verifier-writes`**
-     skill and exercise every write-path check against the dedicated `zz-verifier-test` list ONLY,
-     cleaning up afterwards — never against real task lists.
+   - For any goal with task write checks, instruct it to exercise them on throwaway tasks it creates
+     (e.g. titled `vt-…`) and deletes afterwards — never by editing existing tasks. Since goal 17
+     task writes hit the local DB only (the old `verifier-writes` skill and its `zz-verifier-test`
+     Google lists are retired).
    - Tell it to return the standard PASS/FAIL report (<40 lines), no raw curl/screenshot dumps.
 4. Relay the subagent's PASS/FAIL report to me. If anything FAILED, summarize the failing checks and
    stop for a decision — do not silently "fix and re-verify" without surfacing what broke.
@@ -28,6 +29,8 @@ must stay out of the main context; this is the goal-3 lesson the `/verify` comma
 ## Preconditions to remind the agent about (it handles them via the skill)
 - Backend on :8010, frontend on :5173, both started per `verifier-web`.
 - Overlay DB migrated (`alembic upgrade head`).
-- For goal 4+ write checks: the OAuth token must carry the read/write `tasks` scope. If write calls
-  return 403/insufficient-scope, that's a token problem (the user must re-run
-  `uv run python -m app.google.auth`), not a code failure — report it as a BLOCKED check, not a FAIL.
+- Task writes need no Google scope (goal 17). For Docs/notes write checks, the OAuth token must
+  carry `drive.file`; a 403/insufficient-scope there is a token problem (the user must sign in
+  again), not a code failure — report it as a BLOCKED check, not a FAIL. A `503
+  tasks_import_pending` on `GET /tasks` means the one-time import hasn't run yet — also BLOCKED,
+  not a FAIL.

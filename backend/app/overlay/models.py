@@ -28,6 +28,9 @@ class TaskGroup(SQLModel, table=True):
 
 
 class TaskOverlay(SQLModel, table=True):
+    """LEGACY since goal 17: rank/group are columns on `tasks_store.Task` now. Read
+    only by the one-time importer; dropped in goal 17b."""
+
     __tablename__ = "task_overlay"
 
     # user_id is part of the composite PK (goal 8) — overlay rows are looked up by
