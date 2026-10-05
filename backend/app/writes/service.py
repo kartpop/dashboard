@@ -1,16 +1,17 @@
-"""Write orchestration: reschedule (due-date) and move (cross-list).
+"""Write orchestration: task writes (local store, goal 17) and the notes writer.
 
-Owns sequencing of Google API calls and overlay-row updates, input validation,
-and the decision of what (if anything) to write. The thin one-call wrappers live
-in `app.google.tasks`; merge/group helpers live in `app.overlay.service`. See
-`.claude/rules/writes.md` for the safety invariants enforced here.
+Task writes go to the dashboard's own task store (`app.tasks_store`) — no Google
+Tasks call is reachable from here since goal 17. This module owns validation and
+the bucket rules (idempotent reschedule, group-in-destination-bucket); the store owns
+the rows. The notes writer (`append_note`) is still a Google Docs write. See
+`.claude/rules/writes.md`.
 """
 
 from __future__ import annotations
 
 import logging
 import zoneinfo
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlmodel import Session
@@ -20,9 +21,8 @@ if TYPE_CHECKING:
 
 from app.errors import ApiError
 from app.google import docs as docs_client
-from app.google import tasks as tasks_client
 from app.overlay import service as overlay_svc
-from app.overlay.models import TaskOverlay
+from app.tasks_store import service as store
 
 _NO_DATE = "NO_DATE"
 _UNSET: Any = object()
@@ -35,9 +35,33 @@ _IST = zoneinfo.ZoneInfo("Asia/Kolkata")
 _ancestry_ok: set[str] = set()
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _require_task(session: Session, user_id: int, tasklist_id: str, task_id: str):
+    task = store.get_task(session, user_id, tasklist_id, task_id)
+    if task is None:
+        raise ApiError(404, "task_not_found", "Task not found.")
+    return task
+
+
+def _require_group_in(
+    session: Session, user_id: int, group_id: int | None, tasklist_id: str, bucket: str
+) -> None:
+    if group_id is None:
+        return
+    grp = overlay_svc.get_group(session, user_id, group_id, tasklist_id)
+    if grp is None or grp.bucket_key != bucket:
+        raise ApiError(
+            422,
+            "group_wrong_bucket",
+            "group_id must reference a group in the destination bucket.",
+        )
+
+
 async def reschedule(
     session: Session,
-    creds: "Credentials",
     user_id: int,
     tasklist_id: str,
     task_id: str,
@@ -45,58 +69,34 @@ async def reschedule(
     rank: float | None,
     group_id: int | None,
 ) -> dict:
-    """Reschedule a task across date-buckets (due-date write + overlay update).
+    """Reschedule a task across date-buckets (due date + rank + group).
 
-    Idempotent: skips the Google write when the destination bucket already
-    matches the task's current bucket. `group_id` must reference a group in the
-    destination bucket (422 otherwise); it is always set explicitly on the
-    overlay (None ungroups).
+    `group_id` must reference a group in the destination bucket (422 otherwise); it
+    is always set explicitly (None ungroups). Same-bucket is a no-op on the due.
     """
-    current = await tasks_client.get_task(creds, tasklist_id, task_id)
-    if current is None:
-        raise ApiError(404, "task_not_found", "Task not found.")
-
+    task = _require_task(session, user_id, tasklist_id, task_id)
     target_bucket = due_date or _NO_DATE
+    _require_group_in(session, user_id, group_id, tasklist_id, target_bucket)
 
-    if group_id is not None:
-        grp = overlay_svc.get_group(session, user_id, group_id, tasklist_id)
-        if grp is None or grp.bucket_key != target_bucket:
-            raise ApiError(
-                422,
-                "group_wrong_bucket",
-                "group_id must reference a group in the destination bucket.",
-            )
-
-    current_bucket = overlay_svc._bucket_key(current.get("due"))
-    if target_bucket != current_bucket:
-        new_due = f"{due_date}T00:00:00.000Z" if due_date is not None else None
-        try:
-            await tasks_client.update_due_date(creds, tasklist_id, task_id, new_due)
-        except Exception as exc:
-            raise ApiError(
-                502, "google_write_failed", "Could not update the task due date."
-            ) from exc
-        due_out: str | None = new_due
-    else:
-        # Idempotent no-op: bucket unchanged, so the stored due date stands.
-        due_out = current.get("due")
-
-    row = overlay_svc.upsert_overlay(
-        session, user_id, tasklist_id, task_id, rank=rank, group_id=group_id
-    )
+    task.due = store.due_from_key(due_date)
+    if rank is not None:
+        task.rank = rank
+    task.group_id = group_id
+    task.updated_at = _now()
+    session.commit()
+    session.refresh(task)
 
     return {
         "tasklist_id": tasklist_id,
         "task_id": task_id,
-        "due": due_out,
-        "rank": row.rank,
-        "group_id": row.group_id,
+        "due": store.due_to_wire(task.due),
+        "rank": task.rank,
+        "group_id": task.group_id,
     }
 
 
 async def move(
     session: Session,
-    creds: "Credentials",
     user_id: int,
     tasklist_id: str,
     task_id: str,
@@ -105,93 +105,46 @@ async def move(
     due_date: Any = _UNSET,
     group_id: int | None = None,
 ) -> dict:
-    """Move a task to another list via insert-before-delete.
-
-    Inserts a copy into the target list, then (only on confirmed insert success)
-    deletes the original and migrates the overlay row. A delete failure after a
-    successful insert surfaces the duplicate rather than retrying or losing data.
+    """Move a task to another list — an in-place update; the task keeps its id.
 
     Goal 6 (cross-list drag): the drop may also change the date bucket and land in
-    a destination group, so `move` optionally reschedules on the **insert leg** —
-    one orchestrated write, not two chained calls.
-      - `due_date is _UNSET` → preserve the source task's due (menu/same-bucket drop);
-        an explicit value (a "YYYY-MM-DD" str, or None to clear → NO_DATE) overrides it.
+    a destination group.
+      - `due_date is _UNSET` → preserve the task's due (menu/same-bucket drop); an
+        explicit value (a "YYYY-MM-DD" str, or None to clear → NO_DATE) overrides it.
       - `group_id` must reference a group in the destination `(target_list, bucket)`
-        (422 otherwise); it is set on the migrated overlay row (None = ungrouped).
+        (422 otherwise); None = ungrouped.
+
+    The response keeps `new_task_id` (always equal to `task_id` since goal 17) so
+    existing clients need no change.
     """
     if target_list_id == tasklist_id:
         raise ApiError(400, "same_list", "Task is already in that list.")
 
-    src = await tasks_client.get_task(creds, tasklist_id, task_id)
-    if src is None:
-        raise ApiError(404, "task_not_found", "Task not found.")
+    task = _require_task(session, user_id, tasklist_id, task_id)
+    if store.get_list(session, user_id, target_list_id) is None:
+        raise ApiError(404, "list_not_found", "Target list not found.")
 
-    # The destination bucket governs both group-scope validation and the insert's
-    # due. Preserve the source bucket when due_date is _UNSET; otherwise the
-    # explicit value (or NO_DATE for None) is the target.
     if due_date is _UNSET:
-        target_bucket = overlay_svc._bucket_key(src.get("due"))
+        new_due = task.due
     else:
-        target_bucket = due_date or _NO_DATE
+        new_due = store.due_from_key(due_date)
+    target_bucket = new_due.isoformat() if new_due else _NO_DATE
+    _require_group_in(session, user_id, group_id, target_list_id, target_bucket)
 
-    if group_id is not None:
-        grp = overlay_svc.get_group(session, user_id, group_id, target_list_id)
-        if grp is None or grp.bucket_key != target_bucket:
-            raise ApiError(
-                422,
-                "group_wrong_bucket",
-                "group_id must reference a group in the destination bucket.",
-            )
-
-    body: dict = {
-        "title": src.get("title", ""),
-        "status": src.get("status", "needsAction"),
-    }
-    if src.get("notes") is not None:
-        body["notes"] = src["notes"]
-    if due_date is _UNSET:
-        if src.get("due") is not None:
-            body["due"] = src["due"]
-    elif due_date is not None:
-        body["due"] = f"{due_date}T00:00:00.000Z"
-    # else (explicit None): omit `due` → the copy lands in NO_DATE.
-
-    # Insert first — nothing is deleted yet, so a failure leaves no partial state.
-    try:
-        new = await tasks_client.insert_task(creds, target_list_id, body)
-    except Exception as exc:
-        raise ApiError(
-            502, "google_insert_failed", "Could not copy the task to the target list."
-        ) from exc
-
-    new_id = new["id"]
-
-    # Delete the original only after the insert succeeded. If THIS fails, the task
-    # now exists in both lists — surface the duplicate rather than retry-delete.
-    try:
-        await tasks_client.delete_task(creds, tasklist_id, task_id)
-    except Exception as exc:
-        raise ApiError(
-            502,
-            "move_delete_failed",
-            "Copied to the target list but could not remove the original — "
-            "you now have a duplicate; delete one manually.",
-        ) from exc
-
-    # Migrate the overlay row to the new key, then drop the old one.
-    row = overlay_svc.upsert_overlay(
-        session, user_id, target_list_id, new_id, rank=rank, group_id=group_id
-    )
-    old = session.get(TaskOverlay, (user_id, tasklist_id, task_id))
-    if old is not None:
-        session.delete(old)
-        session.commit()
+    task.position = store.top_position(session, user_id, target_list_id)
+    task.tasklist_id = target_list_id
+    task.due = new_due
+    task.rank = rank
+    task.group_id = group_id
+    task.updated_at = _now()
+    session.commit()
+    session.refresh(task)
 
     return {
         "target_list_id": target_list_id,
-        "new_task_id": new_id,
-        "rank": row.rank,
-        "group_id": row.group_id,
+        "new_task_id": task.id,
+        "rank": task.rank,
+        "group_id": task.group_id,
     }
 
 
@@ -200,7 +153,6 @@ async def move(
 
 async def create_task(
     session: Session,
-    creds: "Credentials",
     user_id: int,
     tasklist_id: str,
     title: str,
@@ -208,36 +160,29 @@ async def create_task(
     notes: str | None = None,
     due_date: str | None = None,
 ) -> dict:
-    """Create a task and seed its overlay row.
-
-    Returns the merged task shape so the client can insert-from-response (no
-    refetch). Optional notes and due_date ("YYYY-MM-DD") are set on insert.
-    """
+    """Create a task. Returns the merged task shape so the client can
+    insert-from-response (no refetch)."""
     if not title.strip():
         raise ApiError(400, "empty_title", "Task title must not be empty.")
+    if store.get_list(session, user_id, tasklist_id) is None:
+        raise ApiError(404, "list_not_found", "Task list not found.")
 
-    body: dict = {"title": title, "status": "needsAction"}
-    if notes:
-        body["notes"] = notes
-    if due_date:
-        body["due"] = f"{due_date}T00:00:00.000Z"
-
-    try:
-        new = await tasks_client.insert_task(creds, tasklist_id, body)
-    except Exception as exc:
-        raise ApiError(
-            502, "google_insert_failed", "Could not create the task."
-        ) from exc
-
-    row = overlay_svc.upsert_overlay(
-        session, user_id, tasklist_id, new["id"], rank=rank, group_id=None
+    task = store.add_task(
+        session,
+        user_id,
+        tasklist_id,
+        title=title,
+        notes=notes,
+        due=store.due_from_key(due_date),
+        rank=rank,
     )
-    return {**new, "type": "task", "rank": row.rank, "group_id": row.group_id}
+    session.commit()
+    session.refresh(task)
+    return {**store.to_wire(task), "type": "task"}
 
 
 async def update_content(
     session: Session,
-    creds: "Credentials",
     user_id: int,
     tasklist_id: str,
     task_id: str,
@@ -245,89 +190,53 @@ async def update_content(
     notes: Any = _UNSET,
     status: Any = _UNSET,
 ) -> dict:
-    """Patch a task's Google content fields (title / notes / status).
-
-    Only fields explicitly provided are written. Completion/uncompletion rides
-    the `status` field (completion writes immediately — see writes.md). The
-    overlay row is untouched (rank/group are not Google content).
-    """
+    """Patch a task's content fields (title / notes / status). Only fields
+    explicitly provided are written; completion rides `status`."""
     if title is not _UNSET and not str(title).strip():
         raise ApiError(400, "empty_title", "Task title must not be empty.")
+    if status is not _UNSET and status not in ("needsAction", "completed"):
+        raise ApiError(400, "bad_status", "status must be needsAction or completed.")
 
-    current = await tasks_client.get_task(creds, tasklist_id, task_id)
-    if current is None:
-        raise ApiError(404, "task_not_found", "Task not found.")
-
-    # Forward only the fields the caller actually set, so the thin wrapper's own
-    # _UNSET default governs what reaches the Google patch body (the sentinels in
-    # this module and the client module are intentionally separate objects).
-    fields: dict[str, Any] = {}
+    task = _require_task(session, user_id, tasklist_id, task_id)
     if title is not _UNSET:
-        fields["title"] = title
+        task.title = title
     if notes is not _UNSET:
-        fields["notes"] = notes
-    if status is not _UNSET:
-        fields["status"] = status
-
-    try:
-        updated = await tasks_client.update_task_content(
-            creds, tasklist_id, task_id, **fields
-        )
-    except Exception as exc:
-        raise ApiError(
-            502, "google_write_failed", "Could not update the task."
-        ) from exc
-
-    overlay = session.get(TaskOverlay, (user_id, tasklist_id, task_id))
-    return {
-        **updated,
-        "type": "task",
-        "rank": overlay.rank if overlay else None,
-        "group_id": overlay.group_id if overlay else None,
-    }
+        task.notes = notes or None
+    if status is not _UNSET and status != task.status:
+        store.set_status(task, status)
+    task.updated_at = _now()
+    session.commit()
+    session.refresh(task)
+    return {**store.to_wire(task), "type": "task"}
 
 
 async def delete(
     session: Session,
-    creds: "Credentials",
     user_id: int,
     tasklist_id: str,
     task_id: str,
 ) -> dict:
-    """Delete a task from Google and drop its overlay row.
-
-    Immediate on the backend — the ~5s deferral + undo is entirely a frontend
-    concern (an undo means this endpoint is never called → zero Google writes).
-    This is the second sanctioned `delete_task` caller (the first is `move`).
-    """
-    current = await tasks_client.get_task(creds, tasklist_id, task_id)
-    if current is None:
-        raise ApiError(404, "task_not_found", "Task not found.")
-
-    try:
-        await tasks_client.delete_task(creds, tasklist_id, task_id)
-    except Exception as exc:
-        raise ApiError(
-            502, "google_delete_failed", "Could not delete the task."
-        ) from exc
-
-    row = session.get(TaskOverlay, (user_id, tasklist_id, task_id))
-    if row is not None:
-        session.delete(row)
-        session.commit()
+    """Delete a task. Immediate on the backend — the ~5s deferral + undo is a
+    frontend concern (an undo means this endpoint is never called)."""
+    task = _require_task(session, user_id, tasklist_id, task_id)
+    session.delete(task)
+    session.commit()
     return {"tasklist_id": tasklist_id, "task_id": task_id, "deleted": True}
 
 
-async def rename_list(creds: "Credentials", tasklist_id: str, title: str) -> dict:
-    """Rename a task list (write to the tasklists resource, not a task)."""
+async def rename_list(
+    session: Session, user_id: int, tasklist_id: str, title: str
+) -> dict:
+    """Rename a task list."""
     if not title.strip():
         raise ApiError(400, "empty_title", "List title must not be empty.")
-    try:
-        return await tasks_client.update_tasklist(creds, tasklist_id, title)
-    except Exception as exc:
-        raise ApiError(
-            502, "google_write_failed", "Could not rename the list."
-        ) from exc
+    tl = store.get_list(session, user_id, tasklist_id)
+    if tl is None:
+        raise ApiError(404, "list_not_found", "Task list not found.")
+    tl.title = title
+    tl.updated_at = _now()
+    session.commit()
+    return {"id": tl.id, "title": tl.title}
 
 
 # ── Notes writer (goal 7) ──────────────────────────────────────────────────────

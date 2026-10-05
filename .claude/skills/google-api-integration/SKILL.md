@@ -1,12 +1,17 @@
 ---
 name: google-api-integration
-description: Conventions for adding a new read-only Google API client module under backend/app/google/ (Tasks, Calendar, Drive, ...). Use when wiring up a new Google service or extending an existing one.
+description: Conventions for adding a new read-only Google API client module under backend/app/google/ (Calendar, Drive, Docs, ...). Use when wiring up a new Google service or extending an existing one.
 ---
 
 # Google API integration conventions
 
-Patterns that repeated across `app/google/tasks.py` and `app/google/calendar.py`. Follow them
-when adding a new service module (e.g. `drive.py`).
+Patterns that repeated across the `app/google/` client modules (`calendar.py`, `docs.py`).
+Follow them when adding a new service module (e.g. `drive.py`).
+
+**Tasks is not a live read path (goal 17).** Tasks live in the app DB (`app/tasks_store/`);
+`app/google/tasks.py` is **import-only** — just `fetch_for_import`, imported solely by
+`app/tasks_store/importer.py` (AST-pinned; deleted in goal 17b). Never add a new Google Tasks call
+or use it as a template for a read path.
 
 ## Credentials (per-user, goal 8)
 
@@ -41,14 +46,14 @@ it via `asyncio.to_thread(...)`. Routers only ever call the async wrapper.
 ## Pagination
 
 Use `app.google._paging.list_all(resource, **list_kwargs)` to walk `nextPageToken` and collect
-every `items` page into one list — needed for both `tasklists().list()` / `tasks().list()` and
-will be needed again for `files().list()` (Drive).
+every `items` page into one list (today only the Tasks importer uses it; it will be needed again
+for `files().list()` (Drive)).
 
 ## Error normalization
 
 Routers wrap any exception from a `get_*` call in `app.errors.ApiError(status_code, code, message)`,
 which shapes the response as `{"error": {"code": ..., "message": ...}}` per the backend
-convention. Pick a `code` that names the failing service, e.g. `google_tasks_unavailable`.
+convention. Pick a `code` that names the failing service, e.g. `google_calendar_unavailable`.
 
 ## Shaping responses
 

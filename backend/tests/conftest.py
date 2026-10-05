@@ -10,6 +10,10 @@ The app is DONE; these fixtures adapt the tests to the new contract:
   the creds object is never actually used to talk to Google.
 - The authenticated `client` overrides the FastAPI auth dependencies so a request
   acts as a chosen user with dummy creds.
+- Goal 17: tasks live in the local store. Seeded users are already "imported"
+  (`tasks_imported_at` set) so no test triggers the Google import by accident; the
+  `store` fixture seeds lists/tasks and reads them back. Importer tests build their
+  own un-imported user.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import app.dev.models  # noqa: F401
 import app.news.models  # noqa: F401
 import app.overlay.models  # noqa: F401
 import app.router.models  # noqa: F401
+import app.tasks_store.models  # noqa: F401
 import app.threads.models  # noqa: F401
 import pytest
 from cryptography.fernet import Fernet
@@ -28,9 +33,15 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.auth.deps import get_current_credentials, get_current_user
+from datetime import date, datetime, timezone
+
 from app.auth.models import User
 from app.db import get_session
 from app.main import app
+from app.tasks_store.models import Task, TaskList
+
+# Default list ids seeded by the `store` fixture (two pinned lists + one other).
+MINE, FOLLOW, OTHER = "L_MINE", "L_FOLLOW", "L_OTHER"
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +74,7 @@ def session(engine):
 
 
 def _make_user(session: Session, **fields) -> User:
+    fields.setdefault("tasks_imported_at", datetime.now(timezone.utc))
     user = User(**fields)
     session.add(user)
     session.commit()
@@ -130,3 +142,83 @@ def auth(engine):
 def client(auth, seeded_user):
     """A TestClient authenticated as the default seeded user (User A)."""
     return auth.as_user(seeded_user)
+
+
+class StoreHelper:
+    """Seeds and reads the local task store (goal 17) for tests."""
+
+    def __init__(self, session: Session):
+        self.session = session
+        self._n = 0
+
+    def lists(self, user: User, lists: dict[str, str] | None = None) -> None:
+        """Create task lists `{id: title}` for `user` (default: My Tasks,
+        Follow-ups, Groceries as MINE / FOLLOW / OTHER, suffixed per user so two
+        users never share an id)."""
+        if lists is None:
+            sfx = "" if user.google_sub == "sub-a" else f"_{user.id}"
+            lists = {
+                MINE + sfx: "My Tasks",
+                FOLLOW + sfx: "Follow-ups",
+                OTHER + sfx: "Groceries",
+            }
+        for i, (lid, title) in enumerate(lists.items()):
+            self.session.add(
+                TaskList(id=lid, user_id=user.id, title=title, position=float(i))
+            )
+        self.session.commit()
+
+    def add(
+        self,
+        user: User,
+        tasklist_id: str,
+        task_id: str | None = None,
+        title: str = "A task",
+        *,
+        due: str | date | None = None,
+        status: str = "needsAction",
+        notes: str | None = None,
+        rank: float | None = None,
+        group_id: int | None = None,
+        completed_at: datetime | None = None,
+    ) -> Task:
+        self._n += 1
+        if isinstance(due, str):
+            due = date.fromisoformat(due[:10])
+        if status == "completed" and completed_at is None:
+            completed_at = datetime.now(timezone.utc)
+        task = Task(
+            id=task_id or f"T{self._n}",
+            user_id=user.id,
+            tasklist_id=tasklist_id,
+            title=title,
+            notes=notes,
+            status=status,
+            due=due,
+            completed_at=completed_at,
+            position=float(self._n),
+            rank=rank,
+            group_id=group_id,
+        )
+        self.session.add(task)
+        self.session.commit()
+        self.session.refresh(task)
+        return task
+
+    def get(self, task_id: str) -> Task | None:
+        self.session.expire_all()
+        return self.session.get(Task, task_id)
+
+    def tasks(self, user: User, tasklist_id: str | None = None) -> list[Task]:
+        from sqlmodel import select
+
+        self.session.expire_all()
+        q = select(Task).where(Task.user_id == user.id)
+        if tasklist_id is not None:
+            q = q.where(Task.tasklist_id == tasklist_id)
+        return list(self.session.exec(q.order_by(Task.position)).all())
+
+
+@pytest.fixture
+def store(session) -> StoreHelper:
+    return StoreHelper(session)

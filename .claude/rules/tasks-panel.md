@@ -20,7 +20,7 @@ dragging an item between two nested contexts cleanly.
 ### ID encoding
 | Entity | Sortable ID |
 |---|---|
-| Standalone task | `task.id` (Google Tasks string) |
+| Standalone task | `task.id` (string; imported tasks keep their Google id, new ones are app-minted) |
 | Group header | `group-{group.id}` (prefixed number) |
 | Task inside group | `task.id` (same string — no prefix) |
 
@@ -216,6 +216,8 @@ the same `setState`** as the source removal:
   **new** task id on the insert leg, so the optimistic row goes in with a `temp-move-{ts}` id and is
   reconciled to `res.new_task_id` on success via **`updateTaskFields`** (patches the id in place,
   whether the row landed standalone or inside a group). Rollback restores the pre-op snapshot.
+  (Goal 17: a move keeps the task id, so `new_task_id` now always equals the original id — the
+  temp-id swap is kept as-is and simply restores the same id.)
 
 Keep this shape for any future bucket/list mutation: never let a task blink out while a Google write
 is in flight. Groups still never span buckets or lists (unchanged — a deliberate constraint, not a
@@ -250,6 +252,25 @@ of `PinnedTasksRow`: **no dnd-kit at all** (no context, sensors, sortables or ha
 cross-list drag and group editing are desktop-only), groups read-only, no per-row date input, and
 the ⋯ / title tap opens a task sheet that calls the same `TaskActions` (`buildTaskActions` in
 `taskRows.ts`, shared with `TaskListColumn`). The DnD code above is untouched.
+
+## Goal 17 — local task store: polling, stale-poll guard, import state
+
+Tasks now come from the app DB (no Google Tasks calls), so the 45s poll is cheap; the wire shape
+is unchanged.
+- **Hidden-tab pause.** The poll runs through `usePoll(tick, POLL_MS)` (`src/usePoll.ts`, shared
+  with the Threads and Scratch hooks): ticks are skipped while `document.visibilityState` is
+  `hidden`, and one catch-up tick runs on `visibilitychange` → visible. Don't hand-roll a
+  `setInterval` poll — use `usePoll`.
+- **Stale-poll guard (the completed-task flicker fix).** `api.ts` tracks every write
+  (`apiPatch` / `apiPost` / `apiPut` / `apiDelete` go through `tracked`, a write counter +
+  generation). Polls call **`apiPollGet`**, which resolves to `null` if a write was in flight when
+  the poll started or ran while it was out; the poll tick ignores a `null`. So a poll that raced a
+  write can never overwrite optimistic state (e.g. a just-completed task popping back). The tasks
+  and threads polls use `apiPollGet` (scratch's poll still uses its plain `load`); user-initiated loads (initial load, manual refresh, post-write
+  `refetchSilently`) keep `apiGet`. The tick is still skipped while an undo-toast window is open.
+- **Import pending.** The first `GET /tasks` for a not-yet-imported user may answer
+  `503 tasks_import_pending`; the initial load then shows **"Importing your tasks…"** (in the
+  `.panel-error` status slot) and retries every 5s (`IMPORT_RETRY_MS`) until it succeeds.
 
 ## Bug log — what broke, why, and what fixed it
 

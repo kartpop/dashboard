@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiDelete, apiGet, apiPatch, apiPost } from "../../api";
+import { apiDelete, apiGet, apiPatch, apiPollGet, apiPost } from "../../api";
+import { usePoll } from "../../usePoll";
 
 export type ListKey = "mine" | "follow";
 
@@ -284,13 +285,16 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
     holdRef.current = on;
   }, []);
 
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      if (holdRef.current) return;
-      load().catch(() => {});
-    }, POLL_MS);
-    return () => window.clearInterval(id);
-  }, [load]);
+  // Paused while the tab is hidden; a poll that raced a write is dropped.
+  usePoll(() => {
+    if (holdRef.current) return;
+    apiPollGet<{ threads: Thread[] }>("/threads")
+      .then((data) => {
+        if (data && !holdRef.current)
+          setState((s) => ({ ...s, threads: data.threads, error: null }));
+      })
+      .catch(() => {});
+  }, POLL_MS);
 
   const refresh = useCallback(() => {
     load().catch((err: Error) =>
@@ -367,7 +371,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
     [fail],
   );
 
-  /** Archive with an Undo toast. Never touches the linked Google task. */
+  /** Archive with an Undo toast. Never touches the linked task. */
   const archiveThread = useCallback(
     (threadId: number) => {
       const t = threadsRef.current.find((x) => x.id === threadId);
@@ -378,8 +382,8 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
         n === 0
           ? "."
           : n === 1
-            ? ". Its open task stays in Google Tasks."
-            : `. Its ${n} open tasks stay in Google Tasks.`;
+            ? ". Its open task stays in your lists."
+            : `. Its ${n} open tasks stay in your lists.`;
       showToast(
         `Archived ${t.title}${stays}`,
         {
@@ -443,7 +447,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
     [fail],
   );
 
-  /** Add an open step: creates the Google task in the chosen pinned list. A thread
+  /** Add an open step: creates the task in the chosen pinned list. A thread
    * may hold any number (goal 14a); the new one slots into the open block by due. */
   const setNextStep = useCallback(
     (
@@ -495,7 +499,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
     [fail, showToast, tasksChanged],
   );
 
-  /** Edit a step. Next-step fields go to Google (label/note/due/list) server-side. */
+  /** Edit a step. Next-step fields write through to the linked task server-side. */
   const updateStep = useCallback(
     (threadId: number, stepId: number, patch: StepPatch): Promise<void> => {
       if (Object.keys(patch).length === 0) return Promise.resolve();
@@ -541,7 +545,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
     [showToast, requestThread],
   );
 
-  /** "Mark done" from the popover: complete the Google task, flip the step. */
+  /** "Mark done" from the popover: complete the task, flip the step. */
   const completeStep = useCallback(
     (threadId: number, stepId: number) => {
       const snapshot = threadsRef.current;
@@ -567,7 +571,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
     [fail, requestThread, tasksChanged, toastLogged],
   );
 
-  /** Delete a done step, or UNLINK one open step (its Google task stays put). */
+  /** Delete a done step, or UNLINK one open step (its task stays put). */
   const deleteStep = useCallback(
     (threadId: number, stepId: number) => {
       const snapshot = threadsRef.current;
@@ -587,7 +591,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
       if (step.kind === "next") {
         showToast(
           `Unlinked “${step.label}”. The task stays in ${
-            step.list ? LIST_LABEL[step.list] : "Google Tasks"
+            step.list ? LIST_LABEL[step.list] : "its list"
           }.`,
         );
       }
@@ -657,7 +661,7 @@ export function useThreadsPanel(options: ThreadsPanelOptions = {}) {
     }));
   }, []);
 
-  /** Is this Google task a live open step? (DashboardPage gates refreshes on it.) */
+  /** Is this task a live open step? (DashboardPage gates refreshes on it.) */
   const isLinked = useCallback(
     (taskId: string) =>
       threadsRef.current.some((t) =>

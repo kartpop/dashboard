@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost } from "../../api";
+import { usePoll } from "../../usePoll";
 
 export interface ScratchEntry {
   id: number;
@@ -121,13 +122,11 @@ export function useScratchPanel() {
     };
   }, [load]);
 
-  // Poll so the backend scheduler's routing is reflected without a manual refresh.
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      load().catch(() => {});
-    }, POLL_MS);
-    return () => window.clearInterval(id);
-  }, [load]);
+  // Poll so the backend scheduler's routing is reflected without a manual refresh
+  // (paused while the tab is hidden).
+  usePoll(() => {
+    load().catch(() => {});
+  }, POLL_MS);
 
   // Classify a capture ahead of the write (no persistence, no Google write) so the
   // LLM runs during the undo window instead of after it. Returns null if the call

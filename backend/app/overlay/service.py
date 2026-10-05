@@ -1,7 +1,8 @@
-"""Overlay service: merges Google Tasks data with local overlay rows.
+"""Overlay service: sorts and groups the user's tasks into date buckets.
 
-This is the ONLY place where merge, sort, and group logic lives.
-app/google/tasks.py does fetch+reshape only; routers stay thin.
+This is the ONLY place where merge, sort, and group logic lives. Since goal 17 the
+tasks come from the local store (`app.tasks_store`) with `rank` / `group_id` already
+on each row — the old overlay table is no longer joined. Routers stay thin.
 """
 
 from __future__ import annotations
@@ -13,7 +14,9 @@ from typing import Any, Literal
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from app.overlay.models import TaskGroup, TaskOverlay
+from app.overlay.models import TaskGroup
+from app.tasks_store import service as store
+from app.tasks_store.models import Task
 
 _IST = zoneinfo.ZoneInfo("Asia/Kolkata")
 _NO_DATE = "NO_DATE"
@@ -60,12 +63,12 @@ def _date_sort_key(due_str: str | None) -> tuple:
     return (0, due_dt.astimezone(_IST).date())
 
 
-def _merge_task(task: dict, overlay: TaskOverlay | None) -> dict:
+def _merge_task(task: dict) -> dict:
     return {
         **task,
         "type": "task",
-        "rank": overlay.rank if overlay else None,
-        "group_id": overlay.group_id if overlay else None,
+        "rank": task.get("rank"),
+        "group_id": task.get("group_id"),
     }
 
 
@@ -76,13 +79,7 @@ def get_merged_task_lists(
     view: Literal["grouped", "flat"] = "grouped",
     show_completed: bool = False,
 ) -> list[dict]:
-    """Left-join THIS user's overlay rows onto raw Google Tasks, then sort/group."""
-    overlays: dict[tuple[str, str], TaskOverlay] = {
-        (row.tasklist_id, row.task_id): row
-        for row in session.exec(
-            select(TaskOverlay).where(TaskOverlay.user_id == user_id)
-        ).all()
-    }
+    """Sort/group THIS user's tasks (`raw_lists` from the task store)."""
     groups_by_list: dict[str, list[TaskGroup]] = {}
     for grp in session.exec(
         select(TaskGroup).where(TaskGroup.user_id == user_id)
@@ -97,7 +94,7 @@ def get_merged_task_lists(
         if not show_completed:
             tasks = [t for t in tasks if t.get("status") != "completed"]
 
-        merged = [_merge_task(t, overlays.get((list_id, t["id"]))) for t in tasks]
+        merged = [_merge_task(t) for t in tasks]
 
         base = {k: v for k, v in task_list.items() if k != "tasks"}
         if view == "flat":
@@ -294,12 +291,16 @@ def delete_group(
     grp = get_group(session, user_id, group_id, tasklist_id)
     if grp is None:
         return False
+    for task in session.exec(
+        select(Task).where(Task.user_id == user_id, Task.group_id == group_id)
+    ).all():
+        task.group_id = None
     session.delete(grp)
     session.commit()
     return True
 
 
-# ── Task overlay upsert ───────────────────────────────────────────────────────
+# ── Rank / group upsert (the old overlay write, now columns on the task) ─────
 
 
 def upsert_overlay(
@@ -309,27 +310,17 @@ def upsert_overlay(
     task_id: str,
     rank: float | None = None,
     group_id: Any = _UNSET,
-) -> TaskOverlay:
-    """Upsert rank and/or group_id. Pass group_id=None to explicitly ungroup."""
-    row = session.get(TaskOverlay, (user_id, tasklist_id, task_id))
-    now = datetime.now(timezone.utc)
-    if row is None:
-        row = TaskOverlay(
-            user_id=user_id,
-            tasklist_id=tasklist_id,
-            task_id=task_id,
-            rank=rank,
-            group_id=None if group_id is _UNSET else group_id,
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(row)
-    else:
-        if rank is not None:
-            row.rank = rank
-        if group_id is not _UNSET:
-            row.group_id = group_id
-        row.updated_at = now
+) -> Task | None:
+    """Set rank and/or group_id on a task. Pass group_id=None to explicitly ungroup.
+    Returns None when the task doesn't exist for this user."""
+    task = store.get_task(session, user_id, tasklist_id, task_id)
+    if task is None:
+        return None
+    if rank is not None:
+        task.rank = rank
+    if group_id is not _UNSET:
+        task.group_id = group_id
+    task.updated_at = datetime.now(timezone.utc)
     session.commit()
-    session.refresh(row)
-    return row
+    session.refresh(task)
+    return task

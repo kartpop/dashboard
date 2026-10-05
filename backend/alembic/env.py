@@ -13,6 +13,7 @@ import app.auth.models  # noqa: F401
 import app.news.models  # noqa: F401
 import app.overlay.models  # noqa: F401
 import app.router.models  # noqa: F401
+import app.tasks_store.models  # noqa: F401
 import app.threads.models  # noqa: F401
 
 config = context.config

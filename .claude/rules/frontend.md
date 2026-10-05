@@ -26,8 +26,8 @@ paths: ["frontend/**"]
   grid stacks and handles hide. No width **persistence** / `ui_prefs` / visibility chooser yet
   (deferred to goal 9). Pinned columns pass `compactDates` → the per-row date collapses to just the
   calendar-picker icon (the bucket header carries the date; Today/Tomorrow headers show weekday +
-  `dd/mm/yyyy` via `bucketHeading`). The pinned lists are matched **by title** against the live
-  Google lists via the static `PINNED_LIST_TITLES` constant (exported from `TasksPanel.tsx`); a
+  `dd/mm/yyyy` via `bucketHeading`). The pinned lists are matched **by title** against the user's
+  task lists (app DB since goal 17) via the static `PINNED_LIST_TITLES` constant (exported from `TasksPanel.tsx`); a
   missing title renders an empty-column hint, not a crash. Tasks-surface state is one lifted
   `useTasksPanel` shared by `PinnedTasksRow` / `OtherTasksSection` / `TasksToasts`; the write toasts
   are rendered once (`position: fixed`).
@@ -92,7 +92,7 @@ paths: ["frontend/**"]
   `commitPending()` fires the held write when the window lapses **and** is called first when a new
   action supersedes the pending one (one toast at a time); an unmount effect flushes any still-held
   write. The two differ only in what Undo does: **delete** (in `useTasksPanel`) restores a snapshot
-  and never sends the `DELETE` (zero Google writes); **capture** (in `useCapture`, lifted out of
+  and never sends the `DELETE` (zero writes); **capture** (in `useCapture`, lifted out of
   `CapturePanel` in goal 15) restores the text into whichever editor sent it (the Scratch editor or
   the quick-capture draft) — prepending above anything typed during the window — and never sends the
   `POST /scratch` (zero backend writes; the append-only store has no delete endpoint by design). If a

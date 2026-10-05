@@ -1,10 +1,12 @@
 """Tests for the goal-5 auto-router: route/dispose logic, the create-only guardrail,
 route-once idempotency, the review queue, and the pure eval scorer.
 
-Both the classifier (the runtime LLM) and Google are fully mocked — no API key, no
-network. The guardrail tests are the gate-critical ones: they prove routing can NEVER
-reach a destructive Google writer (statically via AST, and dynamically by recording
-every call across every routing path).
+Both the classifier (the runtime LLM) and Google Docs/Drive are fully mocked — no API
+key, no network. Since goal 17 tasks live in the local DB: routing writes into the real
+(in-memory) task store, seeded via the `store` fixture, while a spy over
+`app.writes.service` records every task-writer call. The guardrail tests are the
+gate-critical ones: they prove routing can NEVER reach a destructive writer
+(statically via AST, and dynamically by recording every call across every routing path).
 
 Goal 8: `route_entry`/`confirm_review` take the full `User` + live `creds`; every
 Google client fn takes `creds` first; scratch/review rows are user-scoped; and a note's
@@ -19,11 +21,12 @@ import ast
 import asyncio
 import inspect
 import json
+from datetime import date, timedelta
 
 import pytest
 from sqlmodel import select
 
-from tests.conftest import DummyCreds
+from tests.conftest import FOLLOW, MINE, DummyCreds
 
 from app.errors import ApiError
 from app.google import docs as docs_mod
@@ -40,6 +43,7 @@ from app.router.models import (
     ScratchEntry,
 )
 from app.router.schema import RouterClassification, RouterFields
+from app.writes import service as writes_svc
 
 
 def run(coro):
@@ -49,66 +53,52 @@ def run(coro):
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
-class Google:
-    """Records every Google write so we can assert what routing did (and didn't) touch.
+class TaskWrites:
+    """Spies on the task-store writers in `app.writes.service` so we can assert what
+    routing did (and didn't) touch. Since goal 17 tasks live in the local DB, so the
+    sanctioned writers (`create_task`, `reschedule`) pass through to the real store;
+    the forbidden ones (`update_content`, `delete`, `move`) are recorded too. Each call
+    is recorded as `(name, bound_args)` — `session` is dropped."""
 
-    Every wrapper takes `creds` first (goal 8); it is dropped from the recorded tuple."""
+    WRAPPED = ("create_task", "reschedule", "update_content", "delete", "move")
 
     def __init__(self):
-        self.calls: list[tuple] = []
-        self.tasks: dict[tuple[str, str], dict] = {}
-        self._next_id = 0
-
-    async def get_task_lists(self, creds):
-        self.calls.append(("get_task_lists",))
-        return [
-            {"id": "L1", "title": "My Tasks", "tasks": []},
-            {"id": "L2", "title": "Follow-ups", "tasks": []},
-        ]
-
-    async def get_task(self, creds, list_id, task_id):
-        self.calls.append(("get_task", list_id, task_id))
-        return self.tasks.get((list_id, task_id))
-
-    async def insert_task(self, creds, list_id, body):
-        self.calls.append(("insert_task", list_id, body))
-        self._next_id += 1
-        tid = f"new-{self._next_id}"
-        task = {
-            "id": tid,
-            "title": body.get("title", ""),
-            "status": body.get("status", "needsAction"),
-            "due": body.get("due"),
-            "notes": body.get("notes"),
-            "parent": None,
-        }
-        self.tasks[(list_id, tid)] = task
-        return task
-
-    async def update_due_date(self, creds, list_id, task_id, due):
-        self.calls.append(("update_due_date", list_id, task_id, due))
-
-    async def delete_task(self, creds, list_id, task_id):  # must NEVER be routed
-        self.calls.append(("delete_task", list_id, task_id))
-
-    async def update_task_content(self, creds, list_id, task_id, **fields):  # never
-        self.calls.append(("update_task_content", list_id, task_id, fields))
-        return self.tasks.get((list_id, task_id), {"id": task_id})
+        self.calls: list[tuple[str, dict]] = []
 
     def names(self):
         return [c[0] for c in self.calls]
 
+    def args(self, name: str) -> list[dict]:
+        return [a for n, a in self.calls if n == name]
+
 
 @pytest.fixture
-def google(monkeypatch):
-    rec = Google()
-    monkeypatch.setattr("app.google.tasks.get_task_lists", rec.get_task_lists)
-    monkeypatch.setattr("app.google.tasks.get_task", rec.get_task)
-    monkeypatch.setattr("app.google.tasks.insert_task", rec.insert_task)
-    monkeypatch.setattr("app.google.tasks.update_due_date", rec.update_due_date)
-    monkeypatch.setattr("app.google.tasks.delete_task", rec.delete_task)
-    monkeypatch.setattr("app.google.tasks.update_task_content", rec.update_task_content)
+def task_spy(monkeypatch):
+    """The writes spy only — the test seeds its own task lists."""
+    rec = TaskWrites()
+    for name in TaskWrites.WRAPPED:
+        real = getattr(writes_svc, name)
+        sig = inspect.signature(real)
+
+        def _make(name=name, real=real, sig=sig):
+            async def _spy(*args, **kwargs):
+                bound = sig.bind(*args, **kwargs).arguments
+                rec.calls.append(
+                    (name, {k: v for k, v in bound.items() if k != "session"})
+                )
+                return await real(*args, **kwargs)
+
+            return _spy
+
+        monkeypatch.setattr(writes_svc, name, _make())
     return rec
+
+
+@pytest.fixture
+def tasks(task_spy, store, user_a):
+    """The writes spy + user A's default lists (My Tasks / Follow-ups / Groceries)."""
+    store.lists(user_a)
+    return task_spy
 
 
 @pytest.fixture
@@ -185,7 +175,7 @@ def _entry(session, user, text="something"):
 # ── Dispose: each destination ─────────────────────────────────────────────────
 
 
-def test_high_conf_task_creates_one_task(session, user_a, google, fake_classify):
+def test_high_conf_task_creates_one_task(session, user_a, tasks, store, fake_classify):
     _set(fake_classify, "task", 0.95, title="call plumber", due_date="2026-06-20")
     state = run(
         router_svc.route_entry(
@@ -196,83 +186,96 @@ def test_high_conf_task_creates_one_task(session, user_a, google, fake_classify)
         )
     )
     assert state == ROUTED_TASK
-    assert google.names().count("insert_task") == 1
-    assert "update_due_date" in google.names()  # due via reschedule (metadata)
-    assert "delete_task" not in google.names()
-    assert "update_task_content" not in google.names()
+    assert tasks.names().count("create_task") == 1
+    assert "reschedule" in tasks.names()  # due via reschedule (metadata)
+    assert "delete" not in tasks.names()
+    assert "update_content" not in tasks.names()
+    (task,) = store.tasks(user_a)
+    assert task.tasklist_id == MINE and task.title == "call plumber"
+    assert task.due == date(2026, 6, 20)
+    assert task.status == "needsAction"
 
 
 def test_unhinted_task_targets_my_tasks_not_first_list(
-    session, user_a, google, fake_classify, monkeypatch
+    session, user_a, task_spy, store, fake_classify
 ):
     """Regression: an unhinted task must land in the dashboard's pinned "My Tasks"
-    list, NOT Google's first-returned list. On accounts where the first list isn't
-    "My Tasks" (e.g. a pre-existing default + hand-created pinned lists), filing into
-    raw_lists[0] created the task successfully but the dashboard never rendered it."""
-
-    async def reordered_lists(creds):
-        # "My Tasks" is NOT first here — the buggy fallback would pick "Personal".
-        return [
-            {"id": "L0", "title": "Personal", "tasks": []},
-            {"id": "L1", "title": "My Tasks", "tasks": []},
-            {"id": "L2", "title": "Follow-ups", "tasks": []},
-        ]
-
-    monkeypatch.setattr("app.google.tasks.get_task_lists", reordered_lists)
-    _set(fake_classify, "task", 0.95, title="scold aayush", due_date=None)
+    list, NOT the first list. On accounts where the first list isn't "My Tasks"
+    (e.g. a pre-existing default + the pinned lists), filing into lists[0] created
+    the task successfully but the dashboard never rendered it."""
+    # "My Tasks" is NOT first here — the buggy fallback would pick "Personal".
+    store.lists(
+        user_a, {"L_PERSONAL": "Personal", MINE: "My Tasks", FOLLOW: "Follow-ups"}
+    )
+    _set(fake_classify, "task", 0.95, title="ping teammate A", due_date=None)
     state = run(
         router_svc.route_entry(
-            session, user_a, DummyCreds(), _entry(session, user_a, "scold aayush")
+            session, user_a, DummyCreds(), _entry(session, user_a, "ping teammate A")
         )
     )
     assert state == ROUTED_TASK
-    inserts = [c for c in google.calls if c[0] == "insert_task"]
-    assert len(inserts) == 1
-    assert inserts[0][1] == "L1"  # "My Tasks", not "L0" (Personal)
+    assert task_spy.names().count("create_task") == 1
+    assert [t.title for t in store.tasks(user_a, MINE)] == ["ping teammate A"]
+    assert store.tasks(user_a, "L_PERSONAL") == []  # not the first list
 
 
 def test_task_targeting_followups_lands_in_followups(
-    session, user_a, google, fake_classify
+    session, user_a, tasks, store, fake_classify
 ):
-    """A task the classifier tags target_list="Follow-ups" is filed into that list
-    (L2), never My Tasks — the router honours the LLM's two-way list choice."""
-    _set(fake_classify, "task", 0.95, title="ping Ravi", target_list="Follow-ups")
+    """A task the classifier tags target_list="Follow-ups" is filed into that list,
+    never My Tasks — the router honours the LLM's two-way list choice."""
+    _set(fake_classify, "task", 0.95, title="ping teammate B", target_list="Follow-ups")
     state = run(
         router_svc.route_entry(
             session,
             user_a,
             DummyCreds(),
-            _entry(session, user_a, "follow up with ravi"),
+            _entry(session, user_a, "follow up with teammate B"),
         )
     )
     assert state == ROUTED_TASK
-    inserts = [c for c in google.calls if c[0] == "insert_task"]
-    assert len(inserts) == 1
-    assert inserts[0][1] == "L2"  # "Follow-ups"
+    assert tasks.names().count("create_task") == 1
+    assert [t.title for t in store.tasks(user_a, FOLLOW)] == ["ping teammate B"]
+    assert store.tasks(user_a, MINE) == []
+
+
+def test_task_routing_falls_back_to_other_pinned_list(
+    session, user_a, task_spy, store, fake_classify
+):
+    """With "My Tasks" missing, an unhinted task falls back to the other pinned list
+    ("Follow-ups") — never to a third list."""
+    store.lists(user_a, {"L_PERSONAL": "Personal", FOLLOW: "Follow-ups"})
+    _set(fake_classify, "task", 0.95, title="buy milk", due_date=None)
+    state = run(
+        router_svc.route_entry(
+            session, user_a, DummyCreds(), _entry(session, user_a, "buy milk")
+        )
+    )
+    assert state == ROUTED_TASK
+    assert [t.title for t in store.tasks(user_a, FOLLOW)] == ["buy milk"]
+    assert store.tasks(user_a, "L_PERSONAL") == []
 
 
 def test_task_routing_leaves_entry_unrouted_when_no_pinned_lists(
-    session, user_a, google, fake_classify, monkeypatch
+    session, user_a, task_spy, store, fake_classify
 ):
     """Opinionated: the router files ONLY into the two pinned lists. If an account has
     neither, routing raises (never dumps into a third list) and the entry stays
     re-routable — surfacing the two-list prerequisite instead of silently misfiling."""
-
-    async def other_lists(creds):
-        return [{"id": "LX", "title": "Personal", "tasks": []}]
-
-    monkeypatch.setattr("app.google.tasks.get_task_lists", other_lists)
+    store.lists(user_a, {"L_PERSONAL": "Personal"})
     _set(fake_classify, "task", 0.95, title="buy milk", due_date=None)
     entry = _entry(session, user_a, "buy milk")
-    with pytest.raises(ApiError):
+    with pytest.raises(ApiError) as exc:
         run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
-    assert "insert_task" not in google.names()
+    assert exc.value.detail["code"] == "no_pinned_lists"
+    assert "create_task" not in task_spy.names()
+    assert store.tasks(user_a) == []
     session.expire_all()
     assert session.get(ScratchEntry, entry.id).routing_state == UNROUTED
 
 
 def test_high_conf_note_bootstraps_doc_and_writes_verbatim(
-    session, user_a, google, fake_classify, notes
+    session, user_a, tasks, fake_classify, notes
 ):
     """Goal 8/9: with no notes Doc yet, the router bootstraps the user's own folder+Doc
     (`ensure_notes_target`), then writes exactly one Docs insert under an H3 timestamp
@@ -291,11 +294,11 @@ def test_high_conf_note_bootstraps_doc_and_writes_verbatim(
     assert doc_id == notes["doc_id"]  # the app-bootstrapped Doc
     assert written == body  # verbatim — bullets/indentation preserved
     assert heading.endswith("IST")
-    assert "insert_task" not in google.names()
+    assert "create_task" not in tasks.names()
 
 
 def test_note_ancestry_gate_rejects_doc_outside_folder(
-    session, user_a, google, fake_classify, notes, monkeypatch
+    session, user_a, tasks, fake_classify, notes, monkeypatch
 ):
     """A doc whose parents don't reach the notes folder is rejected fail-closed — no
     insert, entry left re-routable."""
@@ -314,7 +317,7 @@ def test_note_ancestry_gate_rejects_doc_outside_folder(
 
 
 def test_note_docs_failure_leaves_entry_unrouted(
-    session, user_a, google, fake_classify, notes, monkeypatch
+    session, user_a, tasks, fake_classify, notes, monkeypatch
 ):
     """A Docs write failure surfaces (never swallowed) and leaves the entry
     re-routable — route-once marks routed only on a successful append."""
@@ -331,20 +334,23 @@ def test_note_docs_failure_leaves_entry_unrouted(
     assert session.get(ScratchEntry, entry.id).routing_state == UNROUTED
 
 
-def test_event_goes_to_review_no_writes(session, user_a, google, fake_classify):
+def test_event_goes_to_review_no_writes(session, user_a, tasks, fake_classify):
     _set(fake_classify, "event", 0.95, title="lunch", event_datetime="thu 1pm")
     state = run(
         router_svc.route_entry(
-            session, user_a, DummyCreds(), _entry(session, user_a, "lunch with Tejas")
+            session,
+            user_a,
+            DummyCreds(),
+            _entry(session, user_a, "lunch with teammate A"),
         )
     )
     assert state == IN_REVIEW
-    assert google.calls == []
+    assert tasks.calls == []
     rows = session.exec(select(ReviewItem)).all()
     assert len(rows) == 1 and rows[0].status == PENDING
 
 
-def test_unknown_goes_to_review(session, user_a, google, fake_classify):
+def test_unknown_goes_to_review(session, user_a, tasks, fake_classify):
     _set(fake_classify, "unknown", 0.1)
     assert (
         run(
@@ -354,11 +360,11 @@ def test_unknown_goes_to_review(session, user_a, google, fake_classify):
         )
         == IN_REVIEW
     )
-    assert google.calls == []
+    assert tasks.calls == []
 
 
 def test_low_confidence_task_goes_to_review_not_written(
-    session, user_a, google, fake_classify
+    session, user_a, tasks, fake_classify
 ):
     _set(fake_classify, "task", 0.4, title="maybe ping someone")
     assert (
@@ -369,10 +375,10 @@ def test_low_confidence_task_goes_to_review_not_written(
         )
         == IN_REVIEW
     )
-    assert "insert_task" not in google.names()
+    assert "create_task" not in tasks.names()
 
 
-def test_review_item_note_text_guarded_at_creation(client, google, fake_classify):
+def test_review_item_note_text_guarded_at_creation(client, tasks, fake_classify):
     """Goal 10: a review item built from a mangled/short `note_text` stores the RAW
     capture verbatim in `fields_json` (the truncation guard moved server-side), so the
     editor prefill sees the un-mangled text — not the low-conf extraction it declined
@@ -388,16 +394,16 @@ def test_review_item_note_text_guarded_at_creation(client, google, fake_classify
 # ── Route-once idempotency ────────────────────────────────────────────────────
 
 
-def test_route_once_does_not_recreate(session, user_a, google, fake_classify):
+def test_route_once_does_not_recreate(session, user_a, tasks, fake_classify):
     _set(fake_classify, "task", 0.95, title="buy milk")
     entry = _entry(session, user_a, "buy milk")
     run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
     state2 = run(router_svc.route_entry(session, user_a, DummyCreds(), entry))  # no-op
     assert state2 == ROUTED_TASK
-    assert google.names().count("insert_task") == 1
+    assert tasks.names().count("create_task") == 1
 
 
-def test_injected_classification_skips_the_llm(session, user_a, google, fake_classify):
+def test_injected_classification_skips_the_llm(session, user_a, tasks, fake_classify):
     """An injected classification (from the capture undo-window pre-classify) is used
     verbatim and the runtime LLM is NOT called again — dispose stays deterministic."""
     # The LLM, if consulted, would say "unknown" → review (never a task write).
@@ -415,19 +421,19 @@ def test_injected_classification_skips_the_llm(session, user_a, google, fake_cla
     )
     # Injected proposal won → a task was filed; the "unknown" LLM path was skipped.
     assert state == ROUTED_TASK
-    assert google.names().count("insert_task") == 1
+    assert tasks.names().count("create_task") == 1
     assert "doc_paths" not in fake_classify  # classify() was never awaited
 
 
-def test_classify_text_does_not_dispose(session, user_a, google, fake_classify):
+def test_classify_text_does_not_dispose(session, user_a, tasks, fake_classify):
     """`classify_text` is pure: it returns the proposal and writes nothing."""
     _set(fake_classify, "task", 0.95, title="buy milk")
     result = run(router_svc.classify_text(session, user_a.id, "buy milk"))
     assert result.destination == "task"
-    assert "insert_task" not in google.names()
+    assert "create_task" not in tasks.names()
 
 
-def test_route_unrouted_tally_then_noop(session, user_a, google, fake_classify, notes):
+def test_route_unrouted_tally_then_noop(session, user_a, tasks, fake_classify, notes):
     _set(fake_classify, "note", 0.95, note_text="x")
     for _ in range(3):
         _entry(session, user_a, "a note")
@@ -445,10 +451,10 @@ def test_route_unrouted_tally_then_noop(session, user_a, google, fake_classify, 
 
 
 def test_router_never_calls_delete_or_status(
-    session, user_a, google, fake_classify, notes
+    session, user_a, tasks, store, fake_classify, notes
 ):
-    """Drive every routing destination; assert delete_task and the status/complete
-    write are NEVER called — the insert-only blast-radius contract, dynamically."""
+    """Drive every routing destination; assert `delete`, the status/complete write
+    (`update_content`), and `move` are NEVER called — the insert-only blast-radius contract, dynamically."""
     scenarios = [
         ("task", 0.95, {"title": "t", "due_date": "2026-06-20"}),
         ("task", 0.3, {"title": "t"}),
@@ -467,26 +473,42 @@ def test_router_never_calls_delete_or_status(
             )
         )
 
-    forbidden = {"delete_task", "update_task_content"}
-    assert forbidden.isdisjoint(google.names()), google.names()
-    assert google.names().count("insert_task") == 1  # the one high-conf task
+    forbidden = {"delete", "update_content", "move"}
+    assert forbidden.isdisjoint(tasks.names()), tasks.names()
+    assert tasks.names().count("create_task") == 1  # the one high-conf task
+    # The one task is open in My Tasks — nothing completed, nothing removed.
+    (task,) = store.tasks(user_a)
+    assert task.tasklist_id == MINE and task.status == "needsAction"
 
 
 def test_router_write_dependency_set_is_insert_only():
-    """Statically: every `writes_svc.<fn>(...)` call reachable in the router service
-    is in {create_task, reschedule, append_note} (goal 7). No destructive writer —
-    no delete_task, status write, update_content, or Docs overwrite — is referenced."""
+    """Statically: every `writes_svc.<attr>` the router service references (called or
+    not) is in {create_task, reschedule, append_note} (goal 7). No destructive writer —
+    no delete, status write, update_content, move, or Docs overwrite — is referenced."""
     tree = ast.parse(inspect.getsource(router_svc))
-    called = set()
+    referenced = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "writes_svc"
+    }
+    assert referenced == {"create_task", "reschedule", "append_note"}, referenced
+
+
+def test_router_does_not_import_the_google_tasks_client():
+    """Goal 17: tasks live in the local store — the router never imports
+    `app.google.tasks` (the importer is its only remaining caller)."""
+    tree = ast.parse(inspect.getsource(router_svc))
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "writes_svc"
-        ):
-            called.add(node.func.attr)
-    assert called == {"create_task", "reschedule", "append_note"}, called
+        if isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            assert mod != "app.google.tasks", mod
+            if mod == "app.google":
+                assert "tasks" not in {a.name for a in node.names}
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                assert not alias.name.startswith("app.google.tasks"), alias.name
 
 
 def _calls_in_function(mod, fn_name: str) -> set[str]:
@@ -575,16 +597,16 @@ def test_router_never_reaches_rename_file():
 # ── Goal 10: the routing-header contract (LLM-interpreted, code-enforced) ──────
 
 
-def _ist_offset_iso(days: int) -> str:
+def _ist_offset_date(days: int) -> date:
     import datetime
     import zoneinfo
 
     base = datetime.datetime.now(zoneinfo.ZoneInfo("Asia/Kolkata")).date()
-    return f"{(base + datetime.timedelta(days=days)).isoformat()}T00:00:00.000Z"
+    return base + timedelta(days=days)
 
 
 def test_header_order_insensitive_task_date_backstop(
-    session, user_a, google, fake_classify
+    session, user_a, tasks, store, fake_classify
 ):
     """'tomorrow task pay the plumber' ≡ 'task tomorrow pay the plumber': both file a
     task under tomorrow's bucket even when the classifier leaves due_date null — the
@@ -597,13 +619,14 @@ def test_header_order_insensitive_task_date_backstop(
             )
         )
         assert state == ROUTED_TASK
-    updates = [c for c in google.calls if c[0] == "update_due_date"]
-    assert len(updates) == 2
-    assert all(c[3] == _ist_offset_iso(1) for c in updates)  # both due tomorrow
+    assert tasks.names().count("reschedule") == 2
+    created = store.tasks(user_a, MINE)
+    assert len(created) == 2
+    assert all(t.due == _ist_offset_date(1) for t in created)  # both due tomorrow
 
 
 def test_keyword_task_header_forces_task_past_confidence_gate(
-    session, user_a, google, fake_classify
+    session, user_a, tasks, fake_classify
 ):
     """An explicit 'task' header files a task even at LOW confidence — a keyword is user
     intent, not a probability, and must never bounce to review (the confidence gate is
@@ -618,12 +641,12 @@ def test_keyword_task_header_forces_task_past_confidence_gate(
         )
     )
     assert state == ROUTED_TASK
-    assert google.names().count("insert_task") == 1
+    assert tasks.names().count("create_task") == 1
     assert session.exec(select(ReviewItem)).all() == []
 
 
 def test_note_header_forces_note_over_wrong_destination(
-    session, user_a, google, fake_classify, notes
+    session, user_a, tasks, fake_classify, notes
 ):
     """A 'notes …' header over a task-looking body the LLM classified as a TASK still
     files a note — degraded safe: body = raw minus the header, no summary/keywords,
@@ -634,14 +657,14 @@ def test_note_header_forces_note_over_wrong_destination(
     )
     state = run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
     assert state == KEPT_NOTE
-    assert "insert_task" not in google.names()
+    assert "create_task" not in tasks.names()
     _doc, _heading, body, summary, kw = notes["insert"][0]
     assert body == "action items: do the thing and more"  # raw minus the header
     assert summary is None and kw is None
 
 
 def test_note_header_low_conf_files_note_never_review(
-    session, user_a, google, fake_classify, notes
+    session, user_a, tasks, fake_classify, notes
 ):
     """The observed bug: 'notes <leaf> - <MOM>' the LLM classified a note but UNDER
     threshold. The header forces it past the gate — filed, never bounced. The LLM did
@@ -667,7 +690,7 @@ def test_note_header_low_conf_files_note_never_review(
 
 
 def test_header_date_backstop_does_not_override_llm_due(
-    session, user_a, google, fake_classify
+    session, user_a, tasks, store, fake_classify
 ):
     """The backstop fills a NULL classifier due; a non-null LLM due is left untouched."""
     _set(fake_classify, "task", 0.95, title="x", due_date="2026-08-01")
@@ -676,14 +699,13 @@ def test_header_date_backstop_does_not_override_llm_due(
             session, user_a, DummyCreds(), _entry(session, user_a, "tomorrow task x")
         )
     )
-    updates = [c for c in google.calls if c[0] == "update_due_date"]
-    assert (
-        updates[-1][3] == "2026-08-01T00:00:00.000Z"
-    )  # LLM due wins over the backstop
+    assert tasks.args("reschedule")[-1]["due_date"] == "2026-08-01"
+    (task,) = store.tasks(user_a)
+    assert task.due == date(2026, 8, 1)  # LLM due wins over the backstop
 
 
 def test_no_header_long_capture_uses_body_inference(
-    session, user_a, google, fake_classify
+    session, user_a, tasks, fake_classify
 ):
     """A capture with no header (a long leading segment, no keyword) routes purely by
     the LLM's body inference + the confidence gate — goal-9 behaviour, unchanged."""
@@ -695,32 +717,35 @@ def test_no_header_long_capture_uses_body_inference(
         )
     )
     assert state == IN_REVIEW  # gate applies (no keyword to force it through)
-    assert "insert_task" not in google.names()
+    assert "create_task" not in tasks.names()
 
 
 # ── Write-failure leaves the entry re-routable ────────────────────────────────
 
 
 def test_write_failure_leaves_entry_unrouted(
-    session, user_a, monkeypatch, google, fake_classify
+    session, user_a, monkeypatch, tasks, store, fake_classify
 ):
     _set(fake_classify, "task", 0.95, title="boom")
 
-    async def _boom(creds, list_id, body):
-        raise RuntimeError("google down")
+    async def _boom(*args, **kwargs):
+        raise ApiError(500, "store_down", "task store write failed")
 
-    monkeypatch.setattr("app.google.tasks.insert_task", _boom)
+    monkeypatch.setattr(writes_svc, "create_task", _boom)
     entry = _entry(session, user_a, "boom")
     with pytest.raises(ApiError):
         run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
     session.expire_all()
     assert session.get(ScratchEntry, entry.id).routing_state == UNROUTED
+    assert store.tasks(user_a) == []
 
 
 # ── Review queue dispositions ─────────────────────────────────────────────────
 
 
-def test_confirm_task_review_fires_one_create(session, user_a, google, fake_classify):
+def test_confirm_task_review_fires_one_create(
+    session, user_a, tasks, store, fake_classify
+):
     _set(fake_classify, "event", 0.95, title="lunch")  # lands in review
     run(
         router_svc.route_entry(
@@ -735,26 +760,28 @@ def test_confirm_task_review_fires_one_create(session, user_a, google, fake_clas
             DummyCreds(),
             item.id,
             destination="task",
-            fields=RouterFields(title="lunch with Tejas", due_date="2026-06-20"),
+            fields=RouterFields(title="lunch with teammate A", due_date="2026-06-20"),
         )
     )
     assert res["entry_state"] == ROUTED_TASK
-    assert google.names().count("insert_task") == 1
+    assert tasks.names().count("create_task") == 1
+    (task,) = store.tasks(user_a, MINE)
+    assert task.title == "lunch with teammate A" and task.due == date(2026, 6, 20)
 
 
-def test_dismiss_writes_nothing(session, user_a, google, fake_classify):
+def test_dismiss_writes_nothing(session, user_a, tasks, fake_classify):
     _set(fake_classify, "unknown", 0.1)
     entry = _entry(session, user_a, "huh")
     run(router_svc.route_entry(session, user_a, DummyCreds(), entry))
     item = session.exec(select(ReviewItem)).first()
     res = run(router_svc.dismiss_review(session, user_a, item.id))
     assert res["status"] == "dismissed"
-    assert google.calls == []
+    assert tasks.calls == []
     session.expire_all()
     assert session.get(ScratchEntry, entry.id).routing_state == RESOLVED
 
 
-def test_confirm_event_acknowledges_no_write(session, user_a, google, fake_classify):
+def test_confirm_event_acknowledges_no_write(session, user_a, tasks, fake_classify):
     _set(fake_classify, "event", 0.95, title="standup")
     run(
         router_svc.route_entry(
@@ -764,13 +791,13 @@ def test_confirm_event_acknowledges_no_write(session, user_a, google, fake_class
     item = session.exec(select(ReviewItem)).first()
     res = run(router_svc.confirm_review(session, user_a, DummyCreds(), item.id))
     assert res["entry_state"] == RESOLVED
-    assert "insert_task" not in google.names()
+    assert "create_task" not in tasks.names()
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-def test_capture_persists_and_lists(client, google, fake_classify):
+def test_capture_persists_and_lists(client, tasks, fake_classify):
     """Capture persists + is listed. It also routes inline (goal 7c) — an event
     proposal lands in review, but the raw entry is stored append-only regardless."""
     _set(fake_classify, "event", 0.95, title="lunch")
@@ -781,26 +808,26 @@ def test_capture_persists_and_lists(client, google, fake_classify):
     assert client.get("/scratch").json()["entries"][0]["id"] == body["id"]
 
 
-def test_capture_routes_inline(client, google, fake_classify):
+def test_capture_routes_inline(client, tasks, fake_classify):
     """Goal 7c: the POST response carries the routed state — a high-confidence task
-    is created in Google without waiting for any scheduler tick."""
+    is created in the task store without waiting for any scheduler tick."""
     _set(fake_classify, "task", 0.95, title="buy milk")
     r = client.post("/scratch", json={"text": "buy milk"})
     assert r.status_code == 201
     assert r.json()["routing_state"] == ROUTED_TASK
-    assert google.names().count("insert_task") == 1
+    assert tasks.names().count("create_task") == 1
 
 
 def test_capture_inline_failure_leaves_unrouted(
-    client, google, fake_classify, monkeypatch
+    client, tasks, fake_classify, monkeypatch
 ):
-    """A Google failure during inline routing still returns 2xx (capture never
+    """A task-write failure during inline routing still returns 2xx (capture never
     lost) and leaves the entry UNROUTED for the scheduler backstop to retry."""
 
-    async def _boom(creds, list_id, body):
-        raise RuntimeError("google down")
+    async def _boom(*args, **kwargs):
+        raise ApiError(500, "store_down", "task store write failed")
 
-    monkeypatch.setattr("app.google.tasks.insert_task", _boom)
+    monkeypatch.setattr(writes_svc, "create_task", _boom)
     _set(fake_classify, "task", 0.95, title="boom")
     r = client.post("/scratch", json={"text": "boom"})
     assert r.status_code == 201
@@ -811,7 +838,7 @@ def test_capture_empty_400(client):
     assert client.post("/scratch", json={"text": "   "}).status_code == 400
 
 
-def test_route_now_endpoint_is_backstop_noop(client, google, fake_classify, notes):
+def test_route_now_endpoint_is_backstop_noop(client, tasks, fake_classify, notes):
     """Capture routes inline now, so route-now (the backstop) finds nothing to do."""
     _set(fake_classify, "note", 0.95, note_text="x")
     client.post("/scratch", json={"text": "a note"})  # routes inline → kept_note
@@ -825,24 +852,26 @@ def test_route_now_endpoint_is_backstop_noop(client, google, fake_classify, note
     }
 
 
-def test_review_confirm_endpoint(client, google, fake_classify):
+def test_review_confirm_endpoint(client, tasks, fake_classify):
     _set(fake_classify, "event", 0.95, title="lunch")
-    client.post("/scratch", json={"text": "lunch with Sam thursday"})  # → review inline
+    client.post(
+        "/scratch", json={"text": "lunch with teammate B thursday"}
+    )  # → review inline
     items = client.get("/review").json()["items"]
     assert len(items) == 1
     r = client.post(
         f"/review/{items[0]['id']}/confirm",
-        json={"destination": "task", "fields": {"title": "lunch with Sam"}},
+        json={"destination": "task", "fields": {"title": "lunch with teammate B"}},
     )
     assert r.status_code == 200 and r.json()["entry_state"] == ROUTED_TASK
-    assert google.names().count("insert_task") == 1
+    assert tasks.names().count("create_task") == 1
     assert client.get("/review").json()["items"] == []  # left the queue
 
 
 # ── Two-user isolation (goal 8 headline AC) ─────────────────────────────────────
 
 
-def test_scratch_list_is_per_user(auth, user_a, user_b, session, google, fake_classify):
+def test_scratch_list_is_per_user(auth, user_a, user_b, session, tasks, fake_classify):
     """B's GET /scratch returns only B's entries — A's captures are invisible."""
     _set(fake_classify, "unknown", 0.1)  # everything lands in review, no writes
     client_a = auth.as_user(user_a)
@@ -859,7 +888,7 @@ def test_scratch_list_is_per_user(auth, user_a, user_b, session, google, fake_cl
 
 
 def test_cannot_confirm_or_dismiss_other_users_review(
-    auth, user_a, user_b, session, google, fake_classify
+    auth, user_a, user_b, session, tasks, fake_classify
 ):
     """B cannot confirm or dismiss A's review item — 404 (no cross-tenant read by id)."""
     _set(fake_classify, "event", 0.95, title="lunch")  # → review inline for A
@@ -875,12 +904,12 @@ def test_cannot_confirm_or_dismiss_other_users_review(
         == 404
     )
     assert client_b.post(f"/review/{item_id}/dismiss").status_code == 404
-    # A's item is still pending + no Google write leaked.
+    # A's item is still pending + no task write leaked.
     assert len(auth.as_user(user_a).get("/review").json()["items"]) == 1
-    assert "insert_task" not in google.names()
+    assert "create_task" not in tasks.names()
 
 
-def test_review_queries_are_user_scoped(session, user_a, user_b, google, fake_classify):
+def test_review_queries_are_user_scoped(session, user_a, user_b, tasks, fake_classify):
     """Service-level: a review item created for A is invisible to B (404 on lookup)."""
     _set(fake_classify, "unknown", 0.1)
     run(
@@ -1268,7 +1297,7 @@ def test_insert_note_plain_body_byte_identical_to_pre_goal10(monkeypatch):
 
 
 def test_auto_route_note_passes_summary_through(
-    session, user_a, google, fake_classify, notes
+    session, user_a, tasks, fake_classify, notes
 ):
     """A high-confidence note carries the classifier's summary into the Doc write."""
     _set(fake_classify, "note", 0.95, note_text="x", summary="entropy video")
@@ -1284,7 +1313,7 @@ def test_auto_route_note_passes_summary_through(
 
 
 def test_confirm_as_note_review_writes_to_doc(
-    session, user_a, google, fake_classify, notes
+    session, user_a, tasks, fake_classify, notes
 ):
     """Confirm-as-note in review fires exactly one Docs append (the panel copy now
     promises this)."""
@@ -1306,7 +1335,7 @@ def test_confirm_as_note_review_writes_to_doc(
 
 
 def test_confirm_as_note_uses_edited_body_and_one_liner(
-    session, user_a, google, fake_classify, notes
+    session, user_a, tasks, fake_classify, notes
 ):
     """Goal 7c: review edits win — a user-edited note body + one-liner are what
     land in the Doc, not the raw captured text."""
@@ -1333,7 +1362,7 @@ def test_confirm_as_note_uses_edited_body_and_one_liner(
     assert summary == "a headline"
 
 
-def test_review_note_endpoint_overrides(client, google, fake_classify, notes):
+def test_review_note_endpoint_overrides(client, tasks, fake_classify, notes):
     """The /confirm endpoint threads note_text + summary overrides through to the
     Doc write (task | note only in the UI; the endpoint honors both)."""
     _set(fake_classify, "event", 0.95, title="lunch")  # → review inline
@@ -1415,7 +1444,7 @@ def test_echo_of_a_truncated_capture_is_discarded(monkeypatch):
 
 
 def test_long_note_body_is_verbatim_minus_header_when_llm_omits_echo(
-    session, user_a, google, fake_classify, notes
+    session, user_a, tasks, fake_classify, notes
 ):
     """The long path end-to-end: the LLM returns note_text=None (as instructed) and
     code supplies the body — the user's words verbatim, minus only the routing header,
@@ -1441,7 +1470,7 @@ def test_long_note_body_is_verbatim_minus_header_when_llm_omits_echo(
 
 
 def test_long_note_falls_back_to_raw_when_there_is_no_header(
-    session, user_a, google, fake_classify, notes
+    session, user_a, tasks, fake_classify, notes
 ):
     """No header to strip → the fallback is the whole raw capture, verbatim. The
     guard must never drop words just because the echo was suppressed."""
@@ -1456,7 +1485,7 @@ def test_long_note_falls_back_to_raw_when_there_is_no_header(
 
 
 def test_concurrent_routers_append_a_note_exactly_once(
-    session, engine, user_a, google, fake_classify, notes
+    session, engine, user_a, tasks, fake_classify, notes
 ):
     """Observed: one capture, two identical Doc entries. Route-once was a
     check-then-act and inline routing holds the entry UNROUTED for ~25s (classifier +
@@ -1483,7 +1512,7 @@ def test_concurrent_routers_append_a_note_exactly_once(
 
 
 def test_failed_route_releases_the_claim_so_the_backstop_can_retry(
-    session, user_a, google, fake_classify, notes, monkeypatch
+    session, user_a, tasks, fake_classify, notes, monkeypatch
 ):
     """A claim must never become a grave: a Docs failure hands the entry back to
     UNROUTED so the backstop still retries it (the goal-5 re-routable contract)."""
@@ -1501,7 +1530,7 @@ def test_failed_route_releases_the_claim_so_the_backstop_can_retry(
     assert entry.routing_state == UNROUTED
 
 
-def test_backstop_reclaims_a_dead_claim(session, user_a, google, fake_classify, notes):
+def test_backstop_reclaims_a_dead_claim(session, user_a, tasks, fake_classify, notes):
     """A router that died mid-route leaves a stale ROUTING row. The backstop exists
     for exactly that crash-recovery case, so it must reclaim it rather than skip it
     forever."""
@@ -1522,7 +1551,7 @@ def test_backstop_reclaims_a_dead_claim(session, user_a, google, fake_classify, 
 
 
 def test_backstop_leaves_a_live_claim_alone(
-    session, user_a, google, fake_classify, notes
+    session, user_a, tasks, fake_classify, notes
 ):
     """The flip side: a fresh claim is someone else's in-flight route. Stealing it is
     the double-append bug, so the backstop must not touch it."""
@@ -1540,7 +1569,7 @@ def test_backstop_leaves_a_live_claim_alone(
 
 
 def test_content_first_line_is_never_mistaken_for_a_header(
-    session, user_a, google, fake_classify, notes
+    session, user_a, tasks, fake_classify, notes
 ):
     """The body fallback may only strip a leading segment that is PROVABLY routing
     words (a task/note keyword or a date word). A short first line of real content is

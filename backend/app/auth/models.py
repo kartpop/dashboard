@@ -36,6 +36,9 @@ class User(SQLModel, table=True):
     # Space-separated scopes actually granted on the last consent — the per-token
     # scope assertion reads these (a broader-than-allowlist grant refuses to serve).
     granted_scopes: Optional[str] = Field(default=None)
+    # Goal 17: when this user's Google Tasks were copied into the local task store.
+    # Null = not imported yet (the import runs automatically; see tasks_store.importer).
+    tasks_imported_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=_utcnow, nullable=False)
 
