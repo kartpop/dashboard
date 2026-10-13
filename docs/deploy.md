@@ -84,8 +84,8 @@ To ship new features/fixes to a host that's already running, rebuild the image
 intact per the invariants above. On the EC2 host:
 
 ```sh
-cd /home/ubuntu/dashboard          # the checkout from bring-up
-git pull                           # fetch the new code
+cd /home/ubuntu/dashboard
+git pull
 docker compose --env-file .env.prod up -d --build
 ```
 

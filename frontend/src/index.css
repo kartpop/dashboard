@@ -810,6 +810,37 @@ h1, h2, h3 {
   border-color: var(--done);
 }
 
+/* The add form's due date: a visible chip ("Tue 13") with the native date input
+   laid invisibly over it, so a click opens the picker. */
+.add-task-date {
+  position: relative;
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.add-task-date:hover {
+  border-color: var(--done);
+}
+
+.add-task-date input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
 .add-task-confirm,
 .add-task-cancel {
   flex-shrink: 0;
@@ -4302,15 +4333,26 @@ h1, h2, h3 {
   font-weight: 600;
 }
 
-/* The native date input sits invisibly over the chip so a tap opens the picker. */
+/* The native date input sits invisibly over the chip so a tap opens the picker.
+   iOS Safari gives date inputs an intrinsic min-width that ignores `width: 100%`
+   — unclipped, the invisible input spilled over the Add button and swallowed its
+   taps. So: no min-width, no native appearance, and the chip clips it. */
+.sheet-chip--pick,
+.m-addrow-date {
+  overflow: hidden;
+}
+
 .sheet-chip--pick input,
 .m-addrow-date input {
   position: absolute;
   inset: 0;
   width: 100%;
+  min-width: 0;
   height: 100%;
   opacity: 0;
   cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .sheet-primary {
@@ -4769,6 +4811,8 @@ h1, h2, h3 {
 }
 
 .m-addrow .add-task-confirm {
+  position: relative;
+  z-index: 1;
   min-height: 36px;
   padding: 0 14px;
   border: 0;

@@ -1,3 +1,5 @@
+import type { MouseEvent } from "react";
+
 import type { Bucket, TaskList, useTasksPanel } from "./useTasksPanel";
 
 // Row-level helpers shared by the desktop columns (TasksPanel.tsx) and the phone
@@ -44,6 +46,25 @@ export function dueToDateInput(due: string | null): string {
 export function istDayKey(offsetDays: number): string {
   const ms = Date.now() + 5.5 * 3600 * 1000 + offsetDays * 86_400_000;
   return new Date(ms).toISOString().slice(0, 10);
+}
+
+/** "YYYY-MM-DD" → a short chip label, e.g. "Tue 13". */
+export function chipDay(key: string): string {
+  return new Date(`${key}T00:00:00Z`).toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+// A native date input laid over a chip/icon: a tap opens the phone's own picker
+// (`showPicker` where supported; the overlaid input catches the tap elsewhere).
+export function openPicker(e: MouseEvent<HTMLInputElement>) {
+  try {
+    e.currentTarget.showPicker?.();
+  } catch {
+    // Not allowed here (e.g. not a user gesture) — the native tap still works.
+  }
 }
 
 /**
