@@ -43,7 +43,10 @@ import {
   bucketHeading,
   bucketUrgencyClass,
   buildTaskActions,
+  chipDay,
   dueToDateInput,
+  istDayKey,
+  openPicker,
 } from "./taskRows";
 
 export function ThreadBadgeIcon() {
@@ -667,7 +670,8 @@ function TaskListColumn({
   const [adding, setAdding] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newNotes, setNewNotes] = useState("");
-  const [newDueDate, setNewDueDate] = useState("");
+  // New tasks default to today; the chip beside the title always shows the date.
+  const [newDueDate, setNewDueDate] = useState(() => istDayKey(0));
 
   function commitListRename() {
     setRenaming(false);
@@ -682,7 +686,7 @@ function TaskListColumn({
   function resetAddForm() {
     setNewTitle("");
     setNewNotes("");
-    setNewDueDate("");
+    setNewDueDate(istDayKey(0));
     setAdding(false);
   }
 
@@ -754,13 +758,16 @@ function TaskListColumn({
                   if (e.key === "Escape") resetAddForm();
                 }}
               />
-              <input
-                type="date"
-                className="task-date"
-                value={newDueDate}
-                aria-label="due date"
-                onChange={(e) => setNewDueDate(e.target.value)}
-              />
+              <label className="add-task-date" title="Due date">
+                {newDueDate ? chipDay(newDueDate) : "No date"}
+                <input
+                  type="date"
+                  value={newDueDate}
+                  aria-label="due date"
+                  onClick={openPicker}
+                  onChange={(e) => setNewDueDate(e.target.value)}
+                />
+              </label>
               <button className="add-task-confirm" onClick={submitNewTask}>
                 Add
               </button>
@@ -1370,8 +1377,8 @@ export function PinnedTasksRow({
             <h2 className="list-title">{title}</h2>
           </div>
           <p className="panel-status panel-error">
-            list &lsquo;{title}&rsquo; not found — rename a list to match,
-            or edit PINNED_LIST_TITLES.
+            list &lsquo;{title}&rsquo; not found — rename a list to match, or
+            edit PINNED_LIST_TITLES.
           </p>
         </section>
       ),

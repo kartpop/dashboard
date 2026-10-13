@@ -1,4 +1,4 @@
-import { type MouseEvent, useState } from "react";
+import { useState } from "react";
 
 import { Sheet } from "../../Sheet";
 import { ThreadBadgeIcon } from "./TasksPanel";
@@ -11,32 +11,16 @@ import {
   bucketHeading,
   bucketUrgencyClass,
   buildTaskActions,
+  chipDay,
   dueToDateInput,
   istDayKey,
+  openPicker,
 } from "./taskRows";
 import type { Task } from "./useTasksPanel";
 
 /** IST weekday (0 = Sun) of today + `offset` days. */
 function istWeekday(offset: number): number {
   return new Date(`${istDayKey(offset)}T00:00:00Z`).getUTCDay();
-}
-
-function chipDay(key: string): string {
-  return new Date(`${key}T00:00:00Z`).toLocaleDateString(undefined, {
-    weekday: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  });
-}
-
-// A native date input laid over a chip/icon: a tap opens the phone's own picker
-// (`showPicker` where supported; the overlaid input catches the tap elsewhere).
-function openPicker(e: MouseEvent<HTMLInputElement>) {
-  try {
-    e.currentTarget.showPicker?.();
-  } catch {
-    // Not allowed here (e.g. not a user gesture) — the native tap still works.
-  }
 }
 
 const CALENDAR = (
@@ -82,7 +66,7 @@ export function MobileTaskList({
 }) {
   const [sheetTaskId, setSheetTaskId] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState("");
-  const [newDue, setNewDue] = useState("");
+  const [newDue, setNewDue] = useState(() => istDayKey(0));
 
   if (tasks.isLoading || tasks.error)
     return (
@@ -113,7 +97,7 @@ export function MobileTaskList({
     if (!t || !list) return;
     void tasks.createTask(list.id, t, { notes: null, dueDate: newDue || null });
     setNewTitle("");
-    setNewDue("");
+    setNewDue(istDayKey(0));
   }
 
   let sheetTask: Task | null = null;

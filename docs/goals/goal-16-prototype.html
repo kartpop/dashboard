@@ -1,0 +1,511 @@
+<title>Dashboard Habits</title>
+<style>
+/* Layout: interactive app frame (rail + Habits view) on top, decision cards below; frame switches to a phone shell on demand or at narrow widths. */
+:root{
+  --bg:#f4f3f1; --panel:#fff; --text:#3f3d44; --text-h:#08060d; --muted:#8b8893; --faint:#b9b6be;
+  --border:#e5e4e7; --muted-bg:#f7f6f4; --line:#d6d4d9;
+  --mine:#047857; --follow:#a16207; --warn:#c0392b; --accent:#2563eb;
+  --mine-bg:color-mix(in srgb,var(--mine) 11%,transparent);
+  --follow-bg:color-mix(in srgb,var(--follow) 13%,transparent);
+  --warn-bg:color-mix(in srgb,var(--warn) 10%,transparent);
+  --accent-bg:color-mix(in srgb,var(--accent) 11%,transparent);
+  --brand:#e8792b; --badge:#e8792b; --on-badge:#fff;
+  --shadow:0 18px 50px rgba(20,18,30,.14),0 2px 6px rgba(20,18,30,.06);
+  --ui:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --mono:ui-monospace,'SF Mono',Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1014; --panel:#16171d; --text:#d1d3d8; --text-h:#f3f4f6; --muted:#8d909a; --faint:#555866;
+    --border:#2e303a; --muted-bg:#1f2028; --line:#3a3c47;
+    --mine:#5cc8a8; --follow:#e0b050; --warn:#ff7b6b; --accent:#7aa2f7;
+    --badge:#f0904a; --on-badge:#16171d;
+    --shadow:0 18px 50px rgba(0,0,0,.6);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1014; --panel:#16171d; --text:#d1d3d8; --text-h:#f3f4f6; --muted:#8d909a; --faint:#555866;
+  --border:#2e303a; --muted-bg:#1f2028; --line:#3a3c47;
+  --mine:#5cc8a8; --follow:#e0b050; --warn:#ff7b6b; --accent:#7aa2f7;
+  --badge:#f0904a; --on-badge:#16171d;
+  --shadow:0 18px 50px rgba(0,0,0,.6);
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font:14px/1.45 var(--ui)}
+button{font:inherit;color:inherit;cursor:pointer;background:none;border:0;padding:0}
+button:disabled{cursor:default}
+input{font:inherit;color:var(--text-h)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){*{transition:none!important}}
+
+/* ── page ─────────────────────────────────────────────── */
+.page{max-width:1080px;margin:0 auto;padding-inline:24px;padding-block:28px 56px;display:grid;gap:28px}
+.intro{display:grid;gap:8px}
+.intro h1{font-size:26px;line-height:1.2;margin:0;color:var(--text-h);font-weight:650;text-wrap:balance}
+.lede{margin:0;max-width:70ch}
+.ctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:999px;background:var(--panel);padding:2px}
+.seg button{padding:5px 12px;border-radius:999px;font-size:12.5px;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--text-h);color:var(--panel)}
+.pillbtn{border:1px solid var(--border);background:var(--panel);border-radius:999px;padding:5px 12px;font-size:12.5px;color:var(--text-h)}
+.ctl-note{font-size:12.5px;color:var(--muted)}
+
+/* ── app frame ────────────────────────────────────────── */
+.stage{display:flex;justify-content:center}
+.frame{width:100%;max-width:1000px;border-radius:14px;border:1px solid var(--border);background:var(--panel);box-shadow:var(--shadow);overflow:hidden;display:flex;flex-direction:column}
+.tabstrip{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--muted-bg);border-bottom:1px solid var(--border);font-size:12px;color:var(--muted)}
+.tabstrip .tabchip{background:var(--panel);border:1px solid var(--border);border-radius:8px 8px 0 0;padding:4px 12px;color:var(--text-h);font-variant-numeric:tabular-nums}
+.shell{display:grid;grid-template-columns:60px minmax(0,1fr);min-height:600px;position:relative}
+.rail{background:var(--muted-bg);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px 6px}
+.rbtn{position:relative;width:100%;display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 2px;border-radius:10px;color:var(--text);font-size:11px}
+.rbtn:hover{background:color-mix(in srgb,var(--text) 8%,transparent)}
+.rbtn[aria-current="page"]{background:color-mix(in srgb,var(--text) 12%,transparent);color:var(--text-h)}
+.rbtn svg{width:20px;height:20px}
+.rbtn.logo{margin-bottom:8px}
+.badge{position:absolute;top:2px;right:7px;min-width:17px;height:17px;padding:0 4px;border-radius:999px;background:var(--badge);color:var(--on-badge);font:700 10.5px/17px var(--ui);text-align:center;font-variant-numeric:tabular-nums;box-shadow:0 0 0 2px var(--muted-bg)}
+.badge[hidden]{display:none}
+.main{min-width:0;overflow:auto;max-height:640px}
+
+/* home placeholder */
+.homeph{padding:28px;display:grid;gap:14px}
+.homeph p{margin:0;color:var(--muted);max-width:52ch}
+.sk{height:14px;border-radius:6px;background:var(--muted-bg)}
+.skgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}
+.skcard{border:1px solid var(--border);border-radius:12px;padding:14px;display:grid;gap:10px}
+
+/* ── habits view ──────────────────────────────────────── */
+.hv{padding:20px 24px 32px;display:grid;gap:14px;max-width:820px}
+.hv-head{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
+.hv-head h2{margin:0;font-size:20px;color:var(--text-h);font-weight:650}
+.hv-sub{color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
+.hv-sub b{color:var(--badge);font-weight:650}
+.hv-sub .clear{color:var(--mine);font-weight:600}
+.solid{margin-left:auto;background:var(--text-h);color:var(--panel);border-radius:9px;padding:7px 12px;font-size:13px;font-weight:600}
+.ghost{border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12.5px;color:var(--text-h);background:var(--panel)}
+.ghost.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
+
+.addform{border:1px solid var(--border);border-radius:12px;padding:12px;display:grid;gap:10px;background:var(--muted-bg)}
+.addform input{width:100%;border:1px solid var(--border);border-radius:9px;padding:9px 11px;background:var(--panel);outline:none;font-size:15px}
+.addform input:focus{border-color:var(--accent)}
+.addrow2{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.addrow2 .lbl{font-size:12.5px;color:var(--muted)}
+.addrow2 .acts{margin-left:auto;display:flex;gap:8px}
+
+.list{display:grid;border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.hrow{display:grid;grid-template-columns:48px minmax(0,1fr) auto 40px;align-items:center;border-top:1px solid var(--border);position:relative}
+.hrow:first-child{border-top:0}
+.hchk{width:48px;height:58px;display:grid;place-items:center}
+.hchk i{width:24px;height:24px;border-radius:8px;border:1.7px solid var(--line);display:grid;place-items:center;transition:background .12s,border-color .12s}
+.hchk svg{width:14px;height:14px;color:var(--panel);opacity:0}
+.hrow.done .hchk i{background:var(--mine);border-color:var(--mine)}
+.hrow.done .hchk svg{opacity:1}
+.hmain{min-width:0;text-align:left;padding:10px 12px 10px 0;display:grid;gap:3px}
+.htitle{color:var(--text-h);font-size:15px;font-weight:560;overflow-wrap:anywhere}
+.hrow.done .htitle{color:var(--muted)}
+.hmeta{font-size:12.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;font-variant-numeric:tabular-nums}
+.hmeta .streak{color:var(--text-h);font-weight:600}
+.hmeta .chip{border-radius:6px;padding:1px 7px;font-size:11.5px;font-weight:600;background:var(--mine-bg);color:var(--mine)}
+.hmeta .chip.open{background:color-mix(in srgb,var(--badge) 16%,transparent);color:var(--badge)}
+
+.week{display:grid;grid-template-columns:repeat(7,24px);gap:3px;padding-right:6px}
+.wd{display:grid;justify-items:center;gap:2px;font-size:10px;color:var(--faint);padding:2px 0;border-radius:6px}
+.wd:not(:disabled):hover{background:var(--muted-bg)}
+.wd i{width:13px;height:13px;border-radius:50%;border:1.6px solid var(--line)}
+.wd.on i{background:var(--mine);border-color:var(--mine)}
+.wd.miss i{border-style:dashed;border-color:var(--faint)}
+.wd.future i{border-color:var(--border)}
+.wd.today{color:var(--text-h);font-weight:700}
+.wd.today i{box-shadow:0 0 0 2px var(--panel),0 0 0 3.5px var(--text-h)}
+.more{width:40px;height:44px;display:grid;place-items:center;color:var(--muted);border-radius:8px}
+.more svg{width:18px;height:18px}
+
+.hint{grid-column:2 / -1;margin:0 12px 12px 0;padding:9px 12px;border-radius:10px;background:var(--follow-bg);display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;font-size:13px;color:var(--text-h)}
+.hint span{flex:1 1 220px;min-width:0}
+.hint .acts{display:flex;gap:6px;flex-wrap:wrap}
+
+.detail{grid-column:2 / -1;padding:2px 12px 14px 0;display:flex;flex-wrap:wrap;gap:14px 28px;align-items:flex-start}
+.grid4{display:grid;grid-template-columns:auto repeat(7,16px);gap:4px;align-items:center;font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.grid4 .c{width:14px;height:14px;border-radius:4px;background:var(--muted-bg);border:1px solid var(--border)}
+.grid4 .c.on{background:var(--mine);border-color:var(--mine)}
+.grid4 .c.na{background:none;border-color:transparent}
+.grid4 .c.today{box-shadow:0 0 0 1.5px var(--text-h)}
+.grid4 .wl{padding-right:4px;text-align:right}
+.stats{display:grid;gap:4px;font-size:13px}
+.stats b{color:var(--text-h);font-variant-numeric:tabular-nums}
+
+.menu{position:absolute;right:8px;top:46px;z-index:5;background:var(--panel);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow);display:grid;min-width:150px;padding:4px}
+.menu button{text-align:left;padding:8px 10px;border-radius:7px;font-size:13.5px;color:var(--text-h)}
+.menu button:hover{background:var(--muted-bg)}
+.menu .danger{color:var(--warn)}
+
+.dropped-h{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);padding:4px 2px}
+.dropped-h .chev{transition:transform .15s;display:inline-grid}
+.dropped-h[aria-expanded="true"] .chev{transform:rotate(90deg)}
+.drow{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;padding:10px 14px;border-top:1px solid var(--border);font-size:13.5px}
+.drow:first-child{border-top:0}
+.drow .t{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--faint)}
+.drow .m{color:var(--muted);font-size:12.5px;flex:1 1 200px;font-variant-numeric:tabular-nums}
+
+.empty{padding:22px;text-align:center;color:var(--muted)}
+
+/* bottom bar (phone shell) */
+.bnav{display:none}
+.toast{position:absolute;left:50%;bottom:18px;transform:translate(-50%,8px);z-index:9;background:var(--text-h);color:var(--panel);border-radius:10px;padding:9px 14px;font-size:13px;display:flex;gap:14px;align-items:center;opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;max-width:calc(100% - 32px)}
+.toast.on{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+.toast button{color:var(--panel);font-weight:650;text-decoration:underline}
+
+/* phone shell: no rail, a bottom bar, week strip drops under the title */
+.frame.phone{max-width:390px;border-radius:30px}
+.frame.phone .tabstrip{display:none}
+.frame.phone .shell{grid-template-columns:minmax(0,1fr);min-height:700px}
+.frame.phone .rail{display:none}
+.frame.phone .main{max-height:700px;padding-bottom:70px}
+.frame.phone .hv{padding:16px 14px 24px}
+.frame.phone .hrow{grid-template-columns:48px minmax(0,1fr) 40px}
+.frame.phone .week{grid-column:2 / 3;grid-row:2;padding:0 0 10px;justify-content:start}
+.frame.phone .hint,.frame.phone .detail{grid-column:2 / -1}
+.frame.phone .bnav{display:grid;grid-template-columns:repeat(6,1fr);position:absolute;left:0;right:0;bottom:0;z-index:8;background:color-mix(in srgb,var(--panel) 94%,transparent);border-top:1px solid var(--border);padding:6px 4px 16px}
+.bnav button{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:10.5px;color:var(--muted);padding:4px 0}
+.bnav button[aria-current="page"]{color:var(--text-h);font-weight:600}
+.bnav svg{width:22px;height:22px}
+.bnav .fab span{width:40px;height:40px;border-radius:13px;background:var(--text-h);color:var(--panel);display:grid;place-items:center}
+.bnav .badge{right:calc(50% - 22px);box-shadow:0 0 0 2px var(--panel)}
+
+/* ── decisions ────────────────────────────────────────── */
+.dec-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr));gap:12px}
+.dec{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px;display:grid;gap:6px;align-content:start}
+.dec-head{display:flex;gap:10px;align-items:baseline}
+.dec-id{font:600 12px var(--mono);color:var(--accent)}
+.dec h3{margin:0;font-size:15.5px;color:var(--text-h);font-weight:620;text-wrap:balance}
+.dec p{margin:0;max-width:66ch}
+.dec .alt{color:var(--muted);font-size:13px}
+.dec .alt b{color:var(--text);font-weight:600}
+.dec code{font:12.5px var(--mono);background:var(--muted-bg);padding:1px 5px;border-radius:5px}
+.dec ul{margin:0;padding-left:18px;display:grid;gap:3px}
+.sec-h{font-size:11px;letter-spacing:.07em;text-transform:uppercase;margin:6px 0 0;color:var(--muted);font-weight:600}
+.qs .dec{border-style:dashed}
+.qs .dec-id{color:var(--badge)}
+.scope{font-size:13px;color:var(--muted);max-width:76ch;margin:0}
+
+@media (max-width:640px){
+  .page{padding-inline:16px}
+}
+</style>
+
+<div class="page">
+  <div class="intro">
+    <h1>Habits: small daily things, tracked lightly</h1>
+    <p class="lede">The frame below works. Tick habits, tap a habit's name for its last four weeks, tap a past dot this week to backfill, use ⋯ to edit or drop, and press <b>Next day</b> to see the badge clear at midnight. The sample habits come from your examples. The date is fixed at Thu 8 Oct so the week has some history to show.</p>
+  </div>
+
+  <div class="ctl">
+    <div class="seg" role="group" aria-label="Shell">
+      <button id="m-desk" aria-pressed="true">Desktop</button>
+      <button id="m-phone" aria-pressed="false">Phone</button>
+    </div>
+    <button class="pillbtn" id="nextday">Next day ›</button>
+    <button class="pillbtn" id="reset">Reset</button>
+    <span class="ctl-note" id="ctl-date"></span>
+  </div>
+
+  <div class="stage">
+    <div class="frame" id="frame">
+      <div class="tabstrip"><span class="tabchip" id="tabtitle">Dashboard</span><span>browser tab title (see Q3)</span></div>
+      <div class="shell">
+        <nav class="rail" aria-label="Primary" id="rail"></nav>
+        <div class="main" id="main"></div>
+        <nav class="bnav" aria-label="Primary" id="bnav"></nav>
+        <div class="toast" id="toast" role="status"><span id="toast-msg"></span><button id="toast-undo" hidden>Undo</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dec-list">
+    <section class="dec">
+      <div class="dec-head"><span class="dec-id">H1</span><h3>Its own rail entry, behind a <code>habits</code> flag</h3></div>
+      <p>Habits sits under Dev in the rail. It uses the same per-user flag as News and Dev: the superuser always has it, and turns it on for others in Settings › People. Adding the flag is one entry in the feature registry plus a <code>habits/gating.py</code> that copies <code>dev/gating.py</code>. The flag gates the rail entry, the badge fetch and every <code>/habits/*</code> endpoint.</p>
+    </section>
+
+    <section class="dec">
+      <div class="dec-head"><span class="dec-id">H2</span><h3>A habit is a name and a weekly target</h3></div>
+      <p>The target is <b>Daily</b> or <b>N times a week</b> (3–6). You don't pick weekdays, a time of day or a reminder. Weeks run Monday to Sunday.</p>
+      <p class="alt"><b>Alternative:</b> pick specific weekdays (e.g. Mon/Wed/Fri). That's more precise, but "4–5 days a week" is about flexibility, so a count fits better.</p>
+    </section>
+
+    <section class="dec">
+      <div class="dec-head"><span class="dec-id">H3</span><h3>The nudge is a number on the rail</h3></div>
+      <p>The Habits icon shows how many habits are <b>still open today</b>: not ticked yet, and still short of this week's target. A 3×/week habit you've already done 3 times this week drops out of the count, so the number only asks for what you still need. When it reaches 0 the badge disappears. At midnight it starts again from the new day's list. Yesterday's misses don't carry over.</p>
+      <p class="alt"><b>Alternative:</b> count every habit you haven't ticked today, whatever the weekly target. It's simpler, but a 4×/week habit would nag you seven days a week.</p>
+    </section>
+
+    <section class="dec">
+      <div class="dec-head"><span class="dec-id">H4</span><h3>Tracking stays small</h3></div>
+      <ul>
+        <li><b>Each row:</b> this week as seven dots (filled = done, dashed = missed, ringed = today), the week's count against the target, and the streak.</li>
+        <li><b>Streak:</b> daily habits count days in a row. N×/week habits count weeks in a row where the target was hit. Not having ticked today, or not having hit the target yet this week, doesn't break a streak.</li>
+        <li><b>Tap the name:</b> a 4-week grid, the hit rate, and the start date.</li>
+      </ul>
+      <p class="alt">Misses show as a muted dashed dot, not red. No charts beyond four weeks.</p>
+    </section>
+
+    <section class="dec">
+      <div class="dec-head"><span class="dec-id">H5</span><h3>Cut losses: one prompt, then Drop</h3></div>
+      <p>Once a habit is two weeks old, if it hit less than half its target over the last 14 days, a single line appears under it: <b>Keep</b>, <b>Ease the target</b>, or <b>Drop</b>. Keep hides the prompt for a week. Drop takes the habit out of today's list and the badge, and keeps its history in a collapsed "Dropped" list where you can revive it. "Piano, 5 minutes" in the mock shows this.</p>
+      <p class="alt"><b>Alternative:</b> no prompt. You drop habits yourself from ⋯ whenever you choose.</p>
+    </section>
+
+    <section class="dec">
+      <div class="dec-head"><span class="dec-id">H6</span><h3>"Today" is your browser's local date</h3></div>
+      <p>The client sends its local date, and a tick is stored as a plain date (no time). The midnight reset happens in your timezone, wherever you are. You can backfill <b>earlier days of the current week</b> by tapping their dots (for days you did it but forgot to tick). You can't tick future days. Weeks before this one are read-only.</p>
+    </section>
+
+    <section class="dec">
+      <div class="dec-head"><span class="dec-id">H7</span><h3>Data: two tables, no Google, no LLM</h3></div>
+      <ul>
+        <li><code>habit</code>: id, user_id, title, target_per_week (1–7), created_on, dropped_on, hint_snoozed_until.</li>
+        <li><code>habit_check</code>: habit_id, day. Unique per (habit, day). Untick deletes the row.</li>
+        <li><code>GET /habits?today=</code> returns the active and dropped habits with the last 5 weeks of ticks. Streaks, counts and the badge number are worked out from that payload on the client, so the rail and the view can't disagree.</li>
+        <li>Writes: create, edit, drop/revive, tick and untick. Alembic migration, SQLite and Postgres.</li>
+      </ul>
+    </section>
+
+    <section class="dec">
+      <div class="dec-head"><span class="dec-id">H8</span><h3>Phone: Habits joins the bottom bar</h3></div>
+      <p>With the flag on, the bar becomes Home · News · + · Dev · Habits · Me, which is six slots. The badge sits on the Habits icon. Switch the frame to <b>Phone</b> to see it. The week dots move under the title.</p>
+      <p class="alt"><b>Alternative:</b> keep five slots and put Habits inside the Me sheet. That hides the badge, which is the whole nudge.</p>
+    </section>
+  </div>
+
+  <h2 class="sec-h">Questions for you</h2>
+  <div class="dec-list qs">
+    <section class="dec"><div class="dec-head"><span class="dec-id">Q1</span><h3>Badge on the Habits icon, not Dev?</h3></div>
+      <p>You said "on the dev rail I see a 2". I read that as "on the rail", with the number on Habits' own icon. If you want the count to show on Home too (e.g. in the header), say so.</p></section>
+    <section class="dec"><div class="dec-head"><span class="dec-id">Q2</span><h3>Badge rule: H3 (the week's need) or every unticked habit?</h3></div>
+      <p>H3 recommends dropping a habit out of the count once its weekly target is met.</p></section>
+    <section class="dec"><div class="dec-head"><span class="dec-id">Q3</span><h3>Also show the count in the browser tab title?</h3></div>
+      <p>"(2) Dashboard" would show even when the dashboard is a background tab. It stays inside the dashboard and costs one line. It's on in the mock. Off is fine too.</p></section>
+    <section class="dec"><div class="dec-head"><span class="dec-id">Q4</span><h3>Should a tick carry a note?</h3></div>
+      <p>For "write a paragraph", you could write the paragraph right on the tick. I'd leave it out of v0: the habit is the doing, and the writing lives wherever you write. If you want it, the Scratchpad capture is the better home.</p></section>
+    <section class="dec"><div class="dec-head"><span class="dec-id">Q5</span><h3>The "Keep / Ease / Drop" prompt (H5): in or out?</h3></div>
+      <p>The threshold is under 50% of target over 14 days, and only after a habit is two weeks old. Tune the numbers, or skip the prompt for v0.</p></section>
+    <section class="dec"><div class="dec-head"><span class="dec-id">Q6</span><h3>How far back can you backfill?</h3></div>
+      <p>H6 allows the current week only. "Yesterday only" is stricter. "Any day" is looser, and then the streak numbers get easier to fudge.</p></section>
+  </div>
+
+  <p class="scope"><b>Out of v0:</b> reminders or notifications of any kind, specific weekdays, times of day, notes on ticks, reordering (habits stay in creation order), sharing habits between users, and history views beyond four weeks.</p>
+</div>
+
+<script>
+(function(){
+const CHECK='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"/></svg>';
+const DOTS='<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>';
+const CHEV='<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 3.5 4.5 4.5L6 12.5"/></svg>';
+const sv=p=>'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">'+p+'</svg>';
+const IC={
+  logo:'<svg viewBox="0 0 28 28" width="28" height="28"><rect width="28" height="28" rx="8" fill="var(--panel)"/><path d="M9 14 19 9M9 14l10 5" stroke="#4c9a6a" stroke-width="2.2" stroke-linecap="round"/><circle cx="9" cy="14" r="3" fill="var(--brand)"/><circle cx="19" cy="9" r="3" fill="var(--brand)"/><circle cx="19" cy="19" r="3" fill="var(--brand)"/></svg>',
+  home:sv('<path d="M4 10.5 12 4l8 6.5"/><path d="M6 9.5V20h4v-6h4v6h4V9.5"/>'),
+  news:sv('<rect x="4" y="5" width="16" height="14" rx="1.5"/><path d="M7.5 9h9M7.5 12.5h9M7.5 16h5"/>'),
+  dev:sv('<path d="m9 8-4 4 4 4M15 8l4 4-4 4"/>'),
+  habits:sv('<circle cx="12" cy="12" r="8"/><path d="m8.5 12.2 2.4 2.4 4.6-5"/>'),
+  plus:sv('<path d="M12 5v14M5 12h14"/>'),
+  me:sv('<circle cx="12" cy="9" r="3.5"/><path d="M5.5 19.5c1.2-3 3.7-4.5 6.5-4.5s5.3 1.5 6.5 4.5"/>')
+};
+
+/* ── dates ── */
+const DAY=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+const add=(d,n)=>{const x=new Date(d);x.setDate(x.getDate()+n);return x};
+const monday=d=>add(d,-((d.getDay()+6)%7));
+const fmt=d=>DAY[d.getDay()]+' '+d.getDate()+' '+MON[d.getMonth()];
+const short=d=>d.getDate()+' '+MON[d.getMonth()];
+const START=new Date(2026,9,8);
+
+/* ── sample data (deterministic) ── */
+function rng(seed){return function(){seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+let S;
+function seed(){
+  const r=rng(16);
+  const spec=[
+    {id:1,title:'Tidy one thing in the house',target:7,age:35,p:.88,today:true},
+    {id:2,title:'Write a paragraph (reflection, physics, tech, anything)',target:5,age:10,p:.7},
+    {id:3,title:'Study a physics snippet',target:5,age:35,p:.72,today:true},
+    {id:4,title:'Explore opportunities: NGOs, roles, a search',target:3,age:24,p:.55,week:[0,1,2]},
+    {id:5,title:'Piano, 5 minutes',target:7,age:21,p:.27},
+    {id:6,title:'Cold shower',target:5,age:50,p:.3,droppedAgo:16}
+  ];
+  const habits=spec.map(s=>{
+    const created=add(START,-s.age);
+    const end=s.droppedAgo?add(START,-s.droppedAgo):add(START,-1);
+    const checks=new Set();
+    for(let d=new Date(created);d<=end;d=add(d,1)) if(r()<s.p) checks.add(iso(d));
+    const mon=monday(START);
+    if(s.week){for(let k=0;k<7;k++){const d=add(mon,k);if(d<START)checks.delete(iso(d))} s.week.forEach(k=>checks.add(iso(add(mon,k))))}
+    if(s.today) checks.add(iso(START));
+    return {id:s.id,title:s.title,target:s.target,created:iso(created),dropped:s.droppedAgo?iso(end):null,checks,snooze:null};
+  });
+  S={today:new Date(START),habits,view:'habits',open:null,menu:null,form:null,droppedOpen:false,phone:S?S.phone:false};
+}
+
+/* ── derived numbers ── */
+const isDaily=h=>h.target===7;
+function weekCount(h,today){const m=monday(today);let n=0;for(let k=0;k<7;k++){const d=add(m,k);if(d<=today&&h.checks.has(iso(d)))n++}return n}
+const doneToday=(h,t)=>h.checks.has(iso(t));
+const metWeek=(h,t)=>weekCount(h,t)>=h.target;
+const isOpen=(h,t)=>!h.dropped&&!doneToday(h,t)&&!metWeek(h,t);
+function streak(h,t){
+  if(isDaily(h)){let d=doneToday(h,t)?new Date(t):add(t,-1),n=0;while(h.checks.has(iso(d))&&iso(d)>=h.created){n++;d=add(d,-1)}return n}
+  let n=metWeek(h,t)?1:0, m=add(monday(t),-7);
+  while(iso(add(m,6))>=h.created){let c=0;for(let k=0;k<7;k++)if(h.checks.has(iso(add(m,k))))c++;if(c>=h.target){n++;m=add(m,-7)}else break}
+  return n;
+}
+function last14(h,t){let n=0;for(let k=1;k<=14;k++)if(h.checks.has(iso(add(t,-k))))n++;return n}
+function struggling(h,t){
+  if(h.dropped)return false;
+  if(iso(add(t,-14))<h.created)return false;
+  if(h.snooze&&iso(t)<h.snooze)return false;
+  return last14(h,t)<h.target*2*0.5;
+}
+const badgeCount=()=>S.habits.filter(h=>isOpen(h,S.today)).length;
+
+/* ── render ── */
+const $=id=>document.getElementById(id);
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function badgeHtml(){const n=badgeCount();return '<span class="badge"'+(n?'':' hidden')+' aria-label="'+n+' habits open today">'+n+'</span>'}
+function renderNav(){
+  const flag=(v,l)=>'<button class="rbtn" data-nav="'+v+'"'+(S.view===v?' aria-current="page"':'')+'>'+IC[v]+'<span>'+l+'</span>'+(v==='habits'?badgeHtml():'')+'</button>';
+  $('rail').innerHTML='<button class="rbtn logo" data-nav="home"'+(S.view==='home'?' aria-current="page"':'')+' aria-label="Home">'+IC.logo+'</button>'+flag('news','News')+flag('dev','Dev')+flag('habits','Habits');
+  const b=(v,l)=>'<button data-nav="'+v+'"'+(S.view===v?' aria-current="page"':'')+'>'+IC[v]+'<span>'+l+'</span>'+(v==='habits'?badgeHtml():'')+'</button>';
+  $('bnav').innerHTML=b('home','Home')+b('news','News')+'<button class="fab" data-nav="home" aria-label="Quick capture"><span>'+IC.plus+'</span></button>'+b('dev','Dev')+b('habits','Habits')+b('me','Me');
+  const n=badgeCount();
+  $('tabtitle').textContent=(n?'('+n+') ':'')+'Dashboard';
+  $('ctl-date').textContent='Mock date: '+fmt(S.today);
+}
+function weekStrip(h){
+  const m=monday(S.today),t=iso(S.today);let s='<div class="week" role="group" aria-label="This week">';
+  for(let k=0;k<7;k++){
+    const d=add(m,k),ds=iso(d),on=h.checks.has(ds),fut=ds>t,before=ds<h.created;
+    const cls=['wd',on?'on':'',(!on&&!fut&&ds<t&&!before)?'miss':'',fut?'future':'',ds===t?'today':''].join(' ');
+    const dis=fut||before||ds===t;
+    s+='<button class="'+cls+'" data-day="'+ds+'" data-h="'+h.id+'"'+(dis?' disabled':'')+' title="'+fmt(d)+(on?' · done':fut?'':' · not done')+(dis?'':' · tap to change')+'"><span>'+'MTWTFSS'[k]+'</span><i></i></button>';
+  }
+  return s+'</div>';
+}
+function metaHtml(h){
+  const t=S.today,st=streak(h,t),wc=weekCount(h,t),bits=[];
+  if(isDaily(h)){
+    bits.push('Daily');
+    bits.push(st?'<span class="streak">'+st+'-day streak</span>':'no streak yet');
+    const m=monday(t);let miss=0;for(let k=0;k<7;k++){const d=add(m,k);if(iso(d)<iso(t)&&iso(d)>=h.created&&!h.checks.has(iso(d)))miss++}
+    if(miss)bits.push('missed '+miss+' this week');
+  }else{
+    bits.push(h.target+'× a week');
+    bits.push(wc+' of '+h.target+' this week');
+    if(st)bits.push('<span class="streak">'+st+'-week streak</span>');
+    if(metWeek(h,t)&&!doneToday(h,t))bits.push('<span class="chip">Week done</span>');
+  }
+  if(isOpen(h,t))bits.push('<span class="chip open">Open today</span>');
+  return bits.join('<span aria-hidden="true">·</span>');
+}
+function detailHtml(h){
+  const t=S.today,start=add(monday(t),-21);let g='<div class="grid4" aria-label="Last four weeks"><span></span>';
+  'MTWTFSS'.split('').forEach(c=>g+='<span style="text-align:center">'+c+'</span>');
+  let hits=0,days=0;
+  for(let w=0;w<4;w++){
+    const m=add(start,w*7);g+='<span class="wl">'+short(m)+'</span>';
+    for(let k=0;k<7;k++){const d=add(m,k),ds=iso(d);const na=ds>iso(t)||ds<h.created;const on=h.checks.has(ds);
+      if(!na&&ds<iso(t)){days++;if(on)hits++}
+      g+='<span class="c'+(on?' on':'')+(na?' na':'')+(ds===iso(t)?' today':'')+'" title="'+fmt(d)+'"></span>'}
+  }
+  g+='</div>';
+  const expected=isDaily(h)?days:Math.round(days*h.target/7);
+  const pct=expected?Math.min(100,Math.round(hits/expected*100)):0;
+  return '<div class="detail">'+g+'<div class="stats"><div>Done <b>'+hits+'</b> of the last <b>'+days+'</b> days</div><div>Hit <b>'+pct+'%</b> of target</div><div>Started <b>'+short(new Date(h.created+'T00:00'))+'</b></div></div></div>';
+}
+function rowHtml(h){
+  const t=S.today,dt=doneToday(h,t);
+  let s='<div class="hrow'+(dt?' done':'')+'" data-row="'+h.id+'">';
+  s+='<button class="hchk" data-tick="'+h.id+'" aria-pressed="'+dt+'" aria-label="Done today: '+esc(h.title)+'"><i>'+CHECK+'</i></button>';
+  s+='<button class="hmain" data-open="'+h.id+'" aria-expanded="'+(S.open===h.id)+'"><span class="htitle">'+esc(h.title)+'</span><span class="hmeta">'+metaHtml(h)+'</span></button>';
+  s+=weekStrip(h);
+  s+='<button class="more" data-menu="'+h.id+'" aria-label="More for '+esc(h.title)+'">'+DOTS+'</button>';
+  if(struggling(h,t)){
+    const easeTo=isDaily(h)?5:Math.max(1,h.target-1);
+    s+='<div class="hint"><span>Done '+last14(h,t)+' of the last 14 days. Keep going, ease it to '+easeTo+'× a week, or drop it?</span><span class="acts"><button class="ghost" data-keep="'+h.id+'">Keep</button><button class="ghost" data-ease="'+h.id+'" data-to="'+easeTo+'">Ease to '+easeTo+'×</button><button class="ghost warn" data-drop="'+h.id+'">Drop</button></span></div>';
+  }
+  if(S.open===h.id)s+=detailHtml(h);
+  if(S.menu===h.id)s+='<div class="menu" role="menu"><button data-edit="'+h.id+'">Edit</button><button class="danger" data-drop="'+h.id+'">Drop</button></div>';
+  return s+'</div>';
+}
+function formHtml(){
+  const f=S.form;const opts=[[7,'Daily'],[6,'6×'],[5,'5×'],[4,'4×'],[3,'3×']];
+  return '<form class="addform" id="hform"><label class="sr" for="hname" style="font-size:12.5px;color:var(--muted)">'+(f.id?'Edit habit':'New habit')+'</label><input id="hname" maxlength="80" placeholder="e.g. Read one page" value="'+esc(f.title)+'" autocomplete="off"><div class="addrow2"><span class="lbl">How often</span><div class="seg" role="group" aria-label="Target">'+opts.map(o=>'<button type="button" data-target="'+o[0]+'" aria-pressed="'+(f.target===o[0])+'">'+o[1]+'</button>').join('')+'</div><span class="lbl">'+(f.target===7?'every day':'a week')+'</span><span class="acts"><button type="button" class="ghost" id="fcancel">Cancel</button><button class="solid" style="margin:0">'+(f.id?'Save':'Add habit')+'</button></span></div></form>';
+}
+function renderMain(){
+  const m=$('main');
+  if(S.view!=='habits'){
+    const name={home:'Home',news:'News',dev:'Dev',me:'Me'}[S.view];
+    m.innerHTML='<div class="homeph"><p><b>'+name+'</b> is unchanged in this goal. The number on the Habits icon is the nudge: it stays visible from every view.</p><div class="skgrid">'+[1,2,3].map(()=>'<div class="skcard"><div class="sk" style="width:40%"></div><div class="sk"></div><div class="sk" style="width:80%"></div><div class="sk" style="width:65%"></div></div>').join('')+'</div></div>';
+    return;
+  }
+  const t=S.today,active=S.habits.filter(h=>!h.dropped),dropped=S.habits.filter(h=>h.dropped),n=badgeCount();
+  let s='<div class="hv"><div class="hv-head"><div><h2>Habits</h2><div class="hv-sub">'+fmt(t)+' · '+(n?'<b>'+n+' open today</b>':'<span class="clear">All done for today</span>')+'</div></div><button class="solid" id="addbtn">+ New habit</button></div>';
+  if(S.form)s+=formHtml();
+  s+=active.length?'<div class="list">'+active.map(rowHtml).join('')+'</div>':'<div class="list"><div class="empty">No habits yet. Add one small thing you want to do most days.</div></div>';
+  if(dropped.length){
+    s+='<button class="dropped-h" id="dtoggle" aria-expanded="'+S.droppedOpen+'"><span class="chev">'+CHEV+'</span>Dropped · '+dropped.length+'</button>';
+    if(S.droppedOpen)s+='<div class="list">'+dropped.map(h=>{
+      const c=new Date(h.created+'T00:00'),e=new Date(h.dropped+'T00:00');const days=Math.round((e-c)/864e5)+1;
+      const exp=isDaily(h)?days:Math.round(days*h.target/7);const hits=[...h.checks].filter(x=>x<=h.dropped).length;
+      return '<div class="drow"><span class="t">'+esc(h.title)+'</span><span class="m">'+short(c)+' – '+short(e)+' · hit '+Math.min(100,Math.round(hits/Math.max(1,exp)*100))+'% of target</span><button class="ghost" data-revive="'+h.id+'">Revive</button></div>'}).join('')+'</div>';
+  }
+  m.innerHTML=s+'</div>';
+}
+function render(){renderNav();renderMain()}
+
+/* ── toast ── */
+let toastT,undoFn=null;
+function toast(msg,undo){$('toast-msg').textContent=msg;undoFn=undo||null;$('toast-undo').hidden=!undo;$('toast').classList.add('on');clearTimeout(toastT);toastT=setTimeout(()=>$('toast').classList.remove('on'),4200)}
+$('toast-undo').onclick=()=>{if(undoFn)undoFn();$('toast').classList.remove('on');render()};
+
+/* ── events ── */
+const H=id=>S.habits.find(h=>h.id===+id);
+document.addEventListener('click',e=>{
+  const el=e.target.closest('button');
+  if(!el){if(S.menu!==null){S.menu=null;render()}return}
+  const d=el.dataset;
+  if(d.nav){S.view=d.nav;S.menu=null;render();return}
+  if(d.tick){const h=H(d.tick),k=iso(S.today);h.checks.has(k)?h.checks.delete(k):h.checks.add(k);render();return}
+  if(d.day){const h=H(d.h);h.checks.has(d.day)?h.checks.delete(d.day):h.checks.add(d.day);render();return}
+  if(d.open){S.open=S.open===+d.open?null:+d.open;S.menu=null;render();return}
+  if(d.menu){S.menu=S.menu===+d.menu?null:+d.menu;render();return}
+  if(d.keep){const h=H(d.keep);h.snooze=iso(add(S.today,7));toast('Okay. No more asking about it this week.');render();return}
+  if(d.ease){const h=H(d.ease),prev=h.target;h.target=+d.to;h.snooze=iso(add(S.today,7));toast('Target eased to '+d.to+'× a week.',()=>{h.target=prev;h.snooze=null});render();return}
+  if(d.drop){const h=H(d.drop);h.dropped=iso(S.today);S.menu=null;if(S.open===h.id)S.open=null;toast('Dropped “'+h.title+'”. Its history is kept.',()=>{h.dropped=null});render();return}
+  if(d.revive){const h=H(d.revive);h.dropped=null;h.snooze=iso(add(S.today,7));toast('Revived “'+h.title+'”.');render();return}
+  if(d.edit){const h=H(d.edit);S.form={id:h.id,title:h.title,target:h.target};S.menu=null;render();$('hname').focus();return}
+  if(d.target){S.form.title=$('hname').value;S.form.target=+d.target;render();return}
+  if(el.id==='addbtn'){S.form={id:null,title:'',target:7};render();$('hname').focus();return}
+  if(el.id==='fcancel'){S.form=null;render();return}
+  if(el.id==='dtoggle'){S.droppedOpen=!S.droppedOpen;render();return}
+  if(S.menu!==null&&!el.closest('.menu')){S.menu=null;render()}
+});
+document.addEventListener('submit',e=>{
+  if(e.target.id!=='hform')return;e.preventDefault();
+  const title=$('hname').value.trim();if(!title){$('hname').focus();return}
+  if(S.form.id){const h=H(S.form.id);h.title=title;h.target=S.form.target;toast('Saved.')}
+  else{S.habits.push({id:Date.now(),title,target:S.form.target,created:iso(S.today),dropped:null,checks:new Set(),snooze:null});toast('Added “'+title+'”. It counts from today.')}
+  S.form=null;render();
+});
+$('nextday').onclick=()=>{S.today=add(S.today,1);S.menu=null;render();const n=badgeCount();toast('Midnight. Yesterday is closed; today starts at '+n+' open.')};
+$('reset').onclick=()=>{seed();render()};
+function setMode(p){S.phone=p;$('frame').classList.toggle('phone',p);$('m-phone').setAttribute('aria-pressed',p);$('m-desk').setAttribute('aria-pressed',!p)}
+$('m-desk').onclick=()=>setMode(false);$('m-phone').onclick=()=>setMode(true);
+
+seed();
+setMode(window.matchMedia('(max-width: 700px)').matches);
+render();
+})();
+</script>

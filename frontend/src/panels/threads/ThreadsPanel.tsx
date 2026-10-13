@@ -242,7 +242,28 @@ type Editing =
   | { threadId: number; mode: "log" }
   | { threadId: number; mode: "next"; list: ListKey; due?: string };
 
-// ── Inline forms (Enter submits, Esc cancels) ─────────────────────────────────
+// ── Inline forms (Enter, Esc and a click outside all save) ──────────────────
+
+/** Calls `onOutside` on a pointerdown outside `ref`. Capture phase: task-row
+ * controls stop pointerdown propagation (so they never start a drag), which would
+ * otherwise hide the click. A pointer listener, not blur — Safari doesn't focus
+ * buttons, so tapping a form's own list toggle would read as leaving it. */
+function useOutsidePointer(
+  ref: { current: HTMLElement | null },
+  onOutside: () => void,
+) {
+  const cb = useRef(onOutside);
+  useEffect(() => {
+    cb.current = onOutside;
+  });
+  useEffect(() => {
+    function onDown(e: PointerEvent) {
+      if (!ref.current?.contains(e.target as Node)) cb.current();
+    }
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+  }, [ref]);
+}
 
 function LogForm({
   onSubmit,
@@ -252,8 +273,15 @@ function LogForm({
   onCancel: () => void;
 }) {
   const [text, setText] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  // Saves whatever was typed (an empty form just closes) — never discards text.
+  function finish() {
+    if (text.trim()) onSubmit(text.trim());
+    else onCancel();
+  }
+  useOutsidePointer(ref, finish);
   return (
-    <div className="thr-form">
+    <div className="thr-form" ref={ref}>
       <input
         type="text"
         className="thr-input"
@@ -263,17 +291,17 @@ function LogForm({
         autoFocus
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && text.trim()) onSubmit(text.trim());
-          if (e.key === "Escape") onCancel();
+          if (e.key === "Enter" || e.key === "Escape") finish();
         }}
       />
-      <div className="thr-hint">Enter logs it as today · Esc cancels</div>
+      <div className="thr-hint">Enter, Esc or click away logs it as today</div>
     </div>
   );
 }
 
 /** Rapid entry (goal 14a): Enter creates the step and keeps the form open with
- * the label cleared and the list + due kept; Esc closes it. */
+ * the label cleared and the list + due kept; Esc or a click outside saves any
+ * typed label and closes. */
 function NextForm({
   initialList,
   initialDue,
@@ -289,16 +317,22 @@ function NextForm({
   const [list, setList] = useState<ListKey>(initialList);
   const [due, setDue] = useState(initialDue ?? istDayKey(1));
   const inputRef = useRef<HTMLInputElement>(null);
+  const ref = useRef<HTMLDivElement>(null);
+  function finish() {
+    if (text.trim()) onSubmit(text.trim(), list, due || null);
+    onCancel();
+  }
+  useOutsidePointer(ref, finish);
   function onKey(e: ReactKeyboardEvent) {
     if (e.key === "Enter" && text.trim()) {
       onSubmit(text.trim(), list, due || null);
       setText("");
       inputRef.current?.focus();
     }
-    if (e.key === "Escape") onCancel();
+    if (e.key === "Escape") finish();
   }
   return (
-    <div className="thr-form">
+    <div className="thr-form" ref={ref}>
       <input
         type="text"
         className="thr-input"
@@ -322,8 +356,46 @@ function NextForm({
         />
       </div>
       <div className="thr-hint">
-        Enter creates it in {LIST_LABEL[list]} and keeps going · Esc closes
+        Enter creates it in {LIST_LABEL[list]} and keeps going · Esc or click
+        away saves and closes
       </div>
+    </div>
+  );
+}
+
+/** Name a new thread. Enter, Esc and a click outside all create it (an empty
+ * name just closes); only Cancel discards. */
+function NewThreadForm({
+  onSubmit,
+  onCancel,
+}: {
+  onSubmit: (title: string) => void;
+  onCancel: () => void;
+}) {
+  const [title, setTitle] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  function finish() {
+    if (title.trim()) onSubmit(title.trim());
+    else onCancel();
+  }
+  useOutsidePointer(ref, finish);
+  return (
+    <div className="thr-newrow" ref={ref}>
+      <input
+        type="text"
+        className="thr-input"
+        placeholder="Name the thread, e.g. “Partner NGO pilot”"
+        aria-label="Thread name"
+        value={title}
+        autoFocus
+        onChange={(e) => setTitle(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === "Escape") finish();
+        }}
+      />
+      <button type="button" className="thr-btn" onClick={onCancel}>
+        Cancel
+      </button>
     </div>
   );
 }
@@ -810,9 +882,7 @@ function StepPopover({
           Note
         </label>
         <i>
-          {isNext
-            ? "Same text as the task’s notes"
-            : "Context for future you"}
+          {isNext ? "Same text as the task’s notes" : "Context for future you"}
         </i>
       </div>
       <textarea
@@ -1411,7 +1481,6 @@ export function ThreadsPanel({
   const [showAll, setShowAll] = useState<Set<number>>(() => new Set());
   const [editing, setEditing] = useState<Editing | null>(null);
   const [creating, setCreating] = useState(false);
-  const [newTitle, setNewTitle] = useState("");
   const [pop, setPop] = useState<{
     threadId: number;
     stepId: number;
@@ -1508,11 +1577,8 @@ export function ThreadsPanel({
     setOpen((s) => new Set(s).add(e.threadId));
   }
 
-  async function submitNew() {
-    const title = newTitle.trim();
-    if (!title) return;
+  async function submitNew(title: string) {
     setCreating(false);
-    setNewTitle("");
     const id = await threads.createThread(title);
     if (id != null) {
       startEdit({ threadId: id, mode: "log" });
@@ -1644,34 +1710,10 @@ export function ThreadsPanel({
     body = (
       <div className={`thr-list thr-list--${view}`}>
         {creating && (
-          <div className="thr-newrow">
-            <input
-              type="text"
-              className="thr-input"
-              placeholder="Name the thread, e.g. “Partner NGO pilot”"
-              aria-label="Thread name"
-              value={newTitle}
-              autoFocus
-              onChange={(e) => setNewTitle(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void submitNew();
-                if (e.key === "Escape") {
-                  setCreating(false);
-                  setNewTitle("");
-                }
-              }}
-            />
-            <button
-              type="button"
-              className="thr-btn"
-              onClick={() => {
-                setCreating(false);
-                setNewTitle("");
-              }}
-            >
-              Cancel
-            </button>
-          </div>
+          <NewThreadForm
+            onSubmit={(title) => void submitNew(title)}
+            onCancel={() => setCreating(false)}
+          />
         )}
         {list.length === 0 && !creating && (
           <p className="thr-empty">
